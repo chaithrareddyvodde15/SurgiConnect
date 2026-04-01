@@ -2,9 +2,9 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 
-// Generate JWT Token
+// 🔐 Generate JWT
 const generateToken = (id) => {
-  return jwt.sign({ id }, "SECRET_KEY", {
+  return jwt.sign({ id }, process.env.JWT_SECRET, {
     expiresIn: "7d",
   });
 };
@@ -32,7 +32,6 @@ const registerUser = async (req, res) => {
 
     res.status(201).json({
       message: "User registered successfully",
-      token: generateToken(user._id),   // ✅ JWT added
       user: {
         id: user._id,
         name: user.name,
@@ -40,7 +39,6 @@ const registerUser = async (req, res) => {
         role: user.role,
       },
     });
-
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -53,27 +51,20 @@ const loginUser = async (req, res) => {
 
     const user = await User.findOne({ email });
 
-    if (!user) {
-      return res.status(400).json({ message: "Invalid credentials" });
+    if (user && (await bcrypt.compare(password, user.password))) {
+      res.json({
+        message: "Login successful",
+        token: generateToken(user._id),
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+        },
+      });
+    } else {
+      res.status(401).json({ message: "Invalid email or password" });
     }
-
-    const isMatch = await bcrypt.compare(password, user.password);
-
-    if (!isMatch) {
-      return res.status(400).json({ message: "Invalid credentials" });
-    }
-
-    res.json({
-      message: "Login successful",
-      token: generateToken(user._id),   // ✅ JWT added
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-      },
-    });
-
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
