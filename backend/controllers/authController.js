@@ -2,13 +2,11 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const User = require('../models/userModel');
 
-const generateToken = (id) => jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '1d' });
+const generateToken = (id) =>
+  jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '1d' });
 
 exports.register = async (req, res) => {
   try {
-    console.log("REGISTER ROUTE HIT");
-    console.log(req.body);
-
     const { name, email, password, role } = req.body;
 
     const hashed = await bcrypt.hash(password, 10);
@@ -36,9 +34,18 @@ exports.register = async (req, res) => {
 
 exports.login = async (req, res) => {
   const { email, password } = req.body;
+
   const user = await User.findOne({ email });
+
   if (!user || !(await bcrypt.compare(password, user.password))) {
-    return res.status(401).json({ message: 'Invalid credentials' });
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid credentials',
+    });
   }
-  res.json({ token: generateToken(user._id) });
+
+  res.json({
+    success: true,
+    token: generateToken(user._id),
+  });
 };

@@ -1,5 +1,5 @@
 const Doctor = require('../models/doctorModel');
-const AuditLog = require('../models/auditLogModel');
+const AuditLog = require("../models/AuditLog")
 
 exports.broadcastEmergency = async (req, res) => {
   const { specialization } = req.body;
