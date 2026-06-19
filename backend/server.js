@@ -8,6 +8,8 @@ const hospitalRoutes = require("./routes/hospitalRoutes");
 const emergencyRequestRoutes = require("./routes/emergencyRequestRoutes");
 const notificationRoutes = require("./routes/notificationRoutes");
 const auditLogRoutes = require("./routes/auditLogRoutes");
+const aiRecommendationRoutes = require("./routes/aiRecommendationRoutes");
+
 
 dotenv.config();
 const app = express();
@@ -21,6 +23,8 @@ app.use("/api/hospitals", hospitalRoutes);
 app.use("/api/emergency-requests", emergencyRequestRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/audit-logs", auditLogRoutes);
+app.use("/api/ai-recommendations", aiRecommendationRoutes);
+
 
 // Start Server
 const PORT = process.env.PORT || 5000;
