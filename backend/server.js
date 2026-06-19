@@ -10,6 +10,7 @@ const notificationRoutes = require("./routes/notificationRoutes");
 const auditLogRoutes = require("./routes/auditLogRoutes");
 const aiRecommendationRoutes = require("./routes/aiRecommendationRoutes");
 const doctorAssignmentRoutes = require("./routes/doctorAssignmentRoutes");
+const dashboardRoutes = require("./routes/dashboardRoutes");
 
 
 dotenv.config();
@@ -26,6 +27,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/audit-logs", auditLogRoutes);
 app.use("/api/ai-recommendations", aiRecommendationRoutes);
 app.use("/api/assignments", doctorAssignmentRoutes);
+app.use("/api/dashboard", dashboardRoutes);
 
 // Start Server
 const PORT = process.env.PORT || 5000;
