@@ -1,21 +1,37 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// controllers/doctorAssignmentController.js
+// (Socket.IO integration patch — only the notifyDoctor helper changes)
+//
+// WHAT CHANGED vs your original file:
+//   1. Import sendNotificationToUser from socketManager
+//   2. notifyDoctor() now also emits a real-time event after DB save
+//   3. Everything else is 100% identical to your existing controller
+//
+// HOW TO APPLY:
+//   Replace your existing controllers/doctorAssignmentController.js with
+//   this file. No other controllers need to change.
+// ─────────────────────────────────────────────────────────────────────────────
+
 const mongoose = require("mongoose");
 const { validationResult } = require("express-validator");
 
-const EmergencyRequest = require("../models/EmergencyRequest");
-const Doctor           = require("../models/doctorModel");
-const Notification     = require("../models/Notification");
+const EmergencyRequest   = require("../models/EmergencyRequest");
+const Doctor             = require("../models/doctorModel");
+const Notification       = require("../models/Notification");
 const { createAuditLog } = require("./auditLogController");
 
-// ─────────────────────────────────────────────
+// ── Socket helper ──────────────────────────────────────────────────────────
+const { sendNotificationToUser } = require("../socket/socketManager"); // ← NEW
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Constants
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 const TERMINAL_STATUSES = ["Completed", "Cancelled"];
 
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // Helpers
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 
-/** Return formatted validation errors or null */
 const getValidationErrors = (req) => {
   const result = validationResult(req);
   if (!result.isEmpty()) {
@@ -24,7 +40,6 @@ const getValidationErrors = (req) => {
   return null;
 };
 
-/** Validate ObjectId and send 400 if invalid */
 const isValidObjectId = (id, res, label = "ID") => {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400).json({ success: false, message: `Invalid ${label}` });
@@ -33,7 +48,6 @@ const isValidObjectId = (id, res, label = "ID") => {
   return true;
 };
 
-/** Standard populate chain reused across queries (matches emergencyRequestController) */
 const populateRequest = (query) =>
   query
     .populate("hospital", "name address contact")
@@ -42,8 +56,22 @@ const populateRequest = (query) =>
     .populate("assignedDoctors.assignedBy", "name email");
 
 /**
- * Create an in-app notification for an assigned/unassigned doctor.
- * Never throws — notification failure must not break the main flow.
+ * Create an in-app notification AND emit a real-time Socket.IO event.
+ *
+ * Flow:
+ *   1. Save Notification to MongoDB (existing behaviour — unchanged)
+ *   2. Attempt real-time delivery via Socket.IO (NEW)
+ *      - If the doctor is offline, the DB record still exists for polling
+ *      - Socket failure never throws — notification is still persisted
+ *
+ * @param {object} opts
+ * @param {string} opts.recipient        - userId of the doctor
+ * @param {string} opts.emergencyRequest - emergencyRequest ObjectId
+ * @param {string} opts.title
+ * @param {string} opts.message
+ * @param {string} opts.type             - Notification.type enum value
+ * @param {string} opts.createdBy        - userId of the manager
+ * @param {string} [opts.socketEvent]    - override the emitted event name
  */
 const notifyDoctor = async ({
   recipient,
@@ -52,9 +80,11 @@ const notifyDoctor = async ({
   message,
   type,
   createdBy,
+  socketEvent = "notification:new",  // ← default real-time event name
 }) => {
   try {
-    await Notification.create({
+    // Step 1 — Persist to MongoDB (unchanged from original)
+    const notification = await Notification.create({
       recipient,
       emergencyRequest,
       title,
@@ -62,15 +92,26 @@ const notifyDoctor = async ({
       type,
       createdBy,
     });
+
+    // Step 2 — Real-time delivery via Socket.IO (NEW)
+    // sendNotificationToUser is a no-op when the user is offline or io is null
+    sendNotificationToUser(recipient.toString(), socketEvent, {
+      _id:              notification._id,
+      title,
+      message,
+      type,
+      emergencyRequest,
+      isRead:           false,
+      createdAt:        notification.createdAt,
+    });
+
   } catch (error) {
+    // Intentionally swallowed — notification failure must never break the
+    // doctor assignment flow (same pattern as original).
     console.error("notifyDoctor error:", error.message);
   }
 };
 
-/**
- * Verify that a list of User IDs actually correspond to verified Doctor
- * profiles. Returns { validIds: Set<string>, invalidIds: string[] }.
- */
 const validateDoctorUserIds = async (userIds) => {
   const doctorProfiles = await Doctor.find({
     userId: { $in: userIds },
@@ -84,19 +125,16 @@ const validateDoctorUserIds = async (userIds) => {
   return { doctorProfiles, validIds, invalidIds };
 };
 
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // @desc    Assign one or more doctors to an emergency request
 // @route   POST /api/assignments/:requestId/assign
 // @access  Manager
-// @body    { doctors: [{ doctorId, role }], note }
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 const assignDoctorsToRequest = async (req, res) => {
   try {
     const errors = getValidationErrors(req);
     if (errors) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Validation failed", errors });
+      return res.status(400).json({ success: false, message: "Validation failed", errors });
     }
 
     const { requestId } = req.params;
@@ -111,7 +149,6 @@ const assignDoctorsToRequest = async (req, res) => {
       });
     }
 
-    // Validate each doctorId shape up front
     for (const entry of doctors) {
       if (!entry.doctorId || !mongoose.Types.ObjectId.isValid(entry.doctorId)) {
         return res.status(400).json({
@@ -123,9 +160,7 @@ const assignDoctorsToRequest = async (req, res) => {
 
     const request = await EmergencyRequest.findById(requestId);
     if (!request) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Emergency request not found" });
+      return res.status(404).json({ success: false, message: "Emergency request not found" });
     }
 
     if (TERMINAL_STATUSES.includes(request.status)) {
@@ -135,7 +170,6 @@ const assignDoctorsToRequest = async (req, res) => {
       });
     }
 
-    // Confirm each doctorId belongs to a real Doctor profile
     const requestedIds = doctors.map((d) => d.doctorId.toString());
     const { invalidIds } = await validateDoctorUserIds(requestedIds);
 
@@ -147,18 +181,9 @@ const assignDoctorsToRequest = async (req, res) => {
       });
     }
 
-    // Prevent duplicate assignments
-    const alreadyAssignedIds = request.assignedDoctors.map((d) =>
-      d.doctor.toString()
-    );
-
-    const duplicates = requestedIds.filter((id) =>
-      alreadyAssignedIds.includes(id)
-    );
-
-    const newEntries = doctors.filter(
-      (d) => !alreadyAssignedIds.includes(d.doctorId.toString())
-    );
+    const alreadyAssignedIds = request.assignedDoctors.map((d) => d.doctor.toString());
+    const duplicates = requestedIds.filter((id) => alreadyAssignedIds.includes(id));
+    const newEntries = doctors.filter((d) => !alreadyAssignedIds.includes(d.doctorId.toString()));
 
     if (newEntries.length === 0) {
       return res.status(409).json({
@@ -169,23 +194,21 @@ const assignDoctorsToRequest = async (req, res) => {
     }
 
     const newAssignments = newEntries.map((entry) => ({
-      doctor: entry.doctorId,
-      role: entry.role || "",
+      doctor:     entry.doctorId,
+      role:       entry.role || "",
       assignedBy: req.user._id,
       assignedAt: new Date(),
     }));
 
     request.assignedDoctors.push(...newAssignments);
 
-    // Update status to Assigned automatically (matches existing convention)
     const previousStatus = request.status;
     if (request.status === "Pending") {
       request.status = "Assigned";
     }
 
-    // Timeline entry — always recorded, regardless of status transition
     request.timeline.push({
-      status: request.status,
+      status:    request.status,
       changedBy: req.user._id,
       note:
         note ||
@@ -197,52 +220,50 @@ const assignDoctorsToRequest = async (req, res) => {
 
     await request.save();
 
-    // Notify each newly-assigned doctor (best-effort, non-blocking failures)
+    // Notify each newly-assigned doctor (DB + real-time via Socket.IO)
     await Promise.all(
       newEntries.map((entry) =>
         notifyDoctor({
-          recipient: entry.doctorId,
+          recipient:        entry.doctorId,
           emergencyRequest: request._id,
-          title: "New Emergency Assignment",
-          message: `You have been assigned to a ${request.severity} severity ${request.emergencyType} case${
+          title:            "New Emergency Assignment",
+          message:          `You have been assigned to a ${request.severity} severity ${request.emergencyType} case${
             entry.role ? ` as ${entry.role}` : ""
           }.`,
-          type: "DoctorAssigned",
-          createdBy: req.user._id,
+          type:             "DoctorAssigned",
+          createdBy:        req.user._id,
+          socketEvent:      "notification:new",  // doctors listen for this
         })
       )
     );
 
-    // Audit log (best-effort — createAuditLog never throws)
     await createAuditLog({
-      user: req.user._id,
-      action: "ASSIGN",
-      entityType: "EmergencyRequest",
-      entityId: request._id,
+      user:        req.user._id,
+      action:      "ASSIGN",
+      entityType:  "EmergencyRequest",
+      entityId:    request._id,
       description: `${newAssignments.length} doctor(s) assigned to emergency request`,
-      metadata: {
+      metadata:    {
         assignedDoctorIds: newEntries.map((d) => d.doctorId),
         previousStatus,
-        newStatus: request.status,
+        newStatus:         request.status,
         duplicatesSkipped: duplicates,
       },
       changeDiff: {
         before: { status: previousStatus },
-        after: { status: request.status },
+        after:  { status: request.status },
       },
-      status: "SUCCESS",
+      status:    "SUCCESS",
       riskLevel: "Low",
       req,
     });
 
-    const populated = await populateRequest(
-      EmergencyRequest.findById(request._id)
-    );
+    const populated = await populateRequest(EmergencyRequest.findById(request._id));
 
     return res.status(200).json({
       success: true,
       message: `${newAssignments.length} doctor(s) assigned successfully`,
-      data: populated,
+      data:    populated,
       skipped:
         duplicates.length > 0
           ? { reason: "already assigned", doctorIds: duplicates }
@@ -250,31 +271,26 @@ const assignDoctorsToRequest = async (req, res) => {
     });
   } catch (error) {
     console.error("assignDoctorsToRequest error:", error);
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error", error: error.message });
+    return res.status(500).json({ success: false, message: "Server error", error: error.message });
   }
 };
 
-// ─────────────────────────────────────────────
-// @desc    Unassign (remove) a doctor from an emergency request
+// ─────────────────────────────────────────────────────────────────────────────
+// @desc    Unassign a doctor from an emergency request
 // @route   DELETE /api/assignments/:requestId/doctors/:doctorId
 // @access  Manager
-// @body    { note } (optional)
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 const unassignDoctor = async (req, res) => {
   try {
     const { requestId, doctorId } = req.params;
     const { note } = req.body;
 
     if (!isValidObjectId(requestId, res, "emergency request ID")) return;
-    if (!isValidObjectId(doctorId, res, "doctor ID")) return;
+    if (!isValidObjectId(doctorId,  res, "doctor ID"))            return;
 
     const request = await EmergencyRequest.findById(requestId);
     if (!request) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Emergency request not found" });
+      return res.status(404).json({ success: false, message: "Emergency request not found" });
     }
 
     if (TERMINAL_STATUSES.includes(request.status)) {
@@ -299,72 +315,68 @@ const unassignDoctor = async (req, res) => {
       (d) => d.doctor.toString() !== doctorId
     );
 
-    // If no doctors remain and request was Assigned, revert to Pending
     const previousStatus = request.status;
     if (request.assignedDoctors.length === 0 && request.status === "Assigned") {
       request.status = "Pending";
     }
 
     request.timeline.push({
-      status: request.status,
+      status:    request.status,
       changedBy: req.user._id,
-      note: note || "Doctor unassigned from request",
+      note:      note || "Doctor unassigned from request",
       changedAt: new Date(),
     });
 
     await request.save();
 
+    // Notify the unassigned doctor (DB + real-time via Socket.IO)
     await notifyDoctor({
-      recipient: doctorId,
+      recipient:        doctorId,
       emergencyRequest: request._id,
-      title: "Emergency Assignment Removed",
-      message: `You have been unassigned from a ${request.emergencyType} case.`,
-      type: "EmergencyUpdated",
-      createdBy: req.user._id,
+      title:            "Emergency Assignment Removed",
+      message:          `You have been unassigned from a ${request.emergencyType} case.`,
+      type:             "EmergencyUpdated",
+      createdBy:        req.user._id,
+      socketEvent:      "notification:unassigned",  // separate event so clients can handle differently
     });
 
     await createAuditLog({
-      user: req.user._id,
-      action: "ASSIGN", // unassign is a sub-type of the assignment lifecycle
-      entityType: "EmergencyRequest",
-      entityId: request._id,
+      user:        req.user._id,
+      action:      "ASSIGN",
+      entityType:  "EmergencyRequest",
+      entityId:    request._id,
       description: "Doctor unassigned from emergency request",
-      metadata: { unassignedDoctorId: doctorId, previousStatus, newStatus: request.status },
+      metadata:    { unassignedDoctorId: doctorId, previousStatus, newStatus: request.status },
       changeDiff: {
         before: { status: previousStatus },
-        after: { status: request.status },
+        after:  { status: request.status },
       },
-      status: "SUCCESS",
+      status:    "SUCCESS",
       riskLevel: "Low",
       req,
     });
 
-    const populated = await populateRequest(
-      EmergencyRequest.findById(request._id)
-    );
+    const populated = await populateRequest(EmergencyRequest.findById(request._id));
 
     return res.status(200).json({
       success: true,
       message: "Doctor unassigned successfully",
-      data: populated,
+      data:    populated,
     });
   } catch (error) {
     console.error("unassignDoctor error:", error);
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error", error: error.message });
+    return res.status(500).json({ success: false, message: "Server error", error: error.message });
   }
 };
 
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // @desc    Get all doctors assigned to a given emergency request
 // @route   GET /api/assignments/:requestId/doctors
 // @access  Manager, Doctor (must be assigned)
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 const getAssignedDoctors = async (req, res) => {
   try {
     const { requestId } = req.params;
-
     if (!isValidObjectId(requestId, res, "emergency request ID")) return;
 
     const request = await populateRequest(
@@ -374,9 +386,7 @@ const getAssignedDoctors = async (req, res) => {
     );
 
     if (!request) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Emergency request not found" });
+      return res.status(404).json({ success: false, message: "Emergency request not found" });
     }
 
     if (req.user.role === "doctor") {
@@ -394,33 +404,29 @@ const getAssignedDoctors = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Assigned doctors fetched successfully",
-      data: {
-        requestId: request._id,
-        status: request.status,
+      data:    {
+        requestId:       request._id,
+        status:          request.status,
         assignedDoctors: request.assignedDoctors,
       },
       count: request.assignedDoctors.length,
     });
   } catch (error) {
     console.error("getAssignedDoctors error:", error);
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error", error: error.message });
+    return res.status(500).json({ success: false, message: "Server error", error: error.message });
   }
 };
 
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // @desc    Get all emergency requests assigned to a given doctor (paginated)
 // @route   GET /api/assignments/doctor/:doctorId
 // @access  Manager (any doctor), Doctor (own only)
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 const getEmergenciesForDoctor = async (req, res) => {
   try {
     const { doctorId } = req.params;
-
     if (!isValidObjectId(doctorId, res, "doctor ID")) return;
 
-    // Doctors may only view their own assignment list
     if (req.user.role === "doctor" && req.user._id.toString() !== doctorId) {
       return res.status(403).json({
         success: false,
@@ -429,19 +435,18 @@ const getEmergenciesForDoctor = async (req, res) => {
     }
 
     const {
-      page = 1,
-      limit = 10,
+      page   = 1,
+      limit  = 10,
       status,
       sortBy = "createdAt",
-      order = "desc",
+      order  = "desc",
     } = req.query;
 
     const filter = { "assignedDoctors.doctor": doctorId };
     if (status) filter.status = status;
 
-    const skip = (Number(page) - 1) * Number(limit);
-    const sortOrder = order === "asc" ? 1 : -1;
-
+    const skip       = (Number(page) - 1) * Number(limit);
+    const sortOrder  = order === "asc" ? 1 : -1;
     const allowedSortFields = ["createdAt", "severity", "status", "updatedAt"];
     const safeSortBy = allowedSortFields.includes(sortBy) ? sortBy : "createdAt";
 
@@ -458,19 +463,17 @@ const getEmergenciesForDoctor = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Emergency requests for doctor fetched successfully",
-      data: requests,
+      data:    requests,
       pagination: {
         total,
-        page: Number(page),
-        limit: Number(limit),
+        page:       Number(page),
+        limit:      Number(limit),
         totalPages: Math.ceil(total / Number(limit)),
       },
     });
   } catch (error) {
     console.error("getEmergenciesForDoctor error:", error);
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error", error: error.message });
+    return res.status(500).json({ success: false, message: "Server error", error: error.message });
   }
 };
 
