@@ -1,6 +1,10 @@
 const EmergencyRequest = require("../models/EmergencyRequest");
+const Notification     = require("../models/Notification");
 const { validationResult } = require("express-validator");
 const mongoose = require("mongoose");
+
+const { createAuditLog }        = require("./auditLogController");
+const { sendNotificationToUser } = require("../socket/socketManager");
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -455,6 +459,255 @@ const updateEmergencyStatus = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal helper — persist a Notification to DB and emit Socket.IO event.
+// Never throws — failure is logged but never breaks the main flow.
+// ─────────────────────────────────────────────────────────────────────────────
+const notifyUser = async ({
+  recipient,
+  emergencyRequest,
+  title,
+  message,
+  type,
+  createdBy,
+  socketEvent = "notification:new",
+}) => {
+  try {
+    const notification = await Notification.create({
+      recipient,
+      emergencyRequest,
+      title,
+      message,
+      type,
+      createdBy,
+    });
+
+    // Real-time delivery — no-op when user is offline
+    sendNotificationToUser(recipient.toString(), socketEvent, {
+      _id:              notification._id,
+      title,
+      message,
+      type,
+      emergencyRequest,
+      isRead:           false,
+      createdAt:        notification.createdAt,
+    });
+  } catch (err) {
+    console.error("notifyUser error:", err.message);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// @desc    Doctor starts treatment — moves status Assigned → In Progress
+// @route   PATCH /api/emergency-requests/:id/start
+// @access  Doctor (must be assigned to this emergency)
+// ─────────────────────────────────────────────────────────────────────────────
+const startEmergency = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // ── 1. Validate ObjectId ───────────────────────────────────────────────
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid emergency request ID" });
+    }
+
+    // ── 2. Fetch the emergency ─────────────────────────────────────────────
+    const request = await EmergencyRequest.findById(id);
+    if (!request) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Emergency request not found" });
+    }
+
+    // ── 3. Verify doctor is assigned ───────────────────────────────────────
+    const isAssigned = request.assignedDoctors.some(
+      (d) => d.doctor.toString() === req.user._id.toString()
+    );
+    if (!isAssigned) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied — you are not assigned to this emergency",
+      });
+    }
+
+    // ── 4. Enforce status precondition ─────────────────────────────────────
+    if (request.status !== "Assigned") {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot start treatment — current status is "${request.status}". Expected "Assigned".`,
+      });
+    }
+
+    // ── 5. Update status and timeline ──────────────────────────────────────
+    request.status = "In Progress";
+    request.timeline.push({
+      status:    "In Progress",
+      changedBy: req.user._id,
+      note:      "Treatment started by assigned doctor",
+      changedAt: new Date(),
+    });
+
+    await request.save();
+
+    // ── 6. Notify manager (DB + Socket.IO) ────────────────────────────────
+    const managerId = request.requestedBy.toString();
+
+    await notifyUser({
+      recipient:        managerId,
+      emergencyRequest: request._id,
+      title:            "Treatment Started",
+      message:          "Doctor has started treatment for emergency case",
+      type:             "EmergencyUpdated",
+      createdBy:        req.user._id,
+      socketEvent:      "notification:new",
+    });
+
+    // ── 7. Audit log ───────────────────────────────────────────────────────
+    await createAuditLog({
+      user:        req.user._id,
+      action:      "STATUS_CHANGE",
+      entityType:  "EmergencyRequest",
+      entityId:    request._id,
+      description: "Doctor started treatment — status changed to In Progress",
+      metadata: {
+        doctorId:       req.user._id,
+        previousStatus: "Assigned",
+        newStatus:      "In Progress",
+      },
+      changeDiff: {
+        before: { status: "Assigned" },
+        after:  { status: "In Progress" },
+      },
+      status:    "SUCCESS",
+      riskLevel: "Medium",
+      req,
+    });
+
+    // ── 8. Return populated response ───────────────────────────────────────
+    const populated = await populateRequest(EmergencyRequest.findById(request._id));
+
+    return res.status(200).json({
+      success: true,
+      message: "Emergency treatment started successfully",
+      data:    populated,
+    });
+  } catch (error) {
+    console.error("startEmergency error:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Server error", error: error.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// @desc    Doctor completes treatment — moves status In Progress → Completed
+// @route   PATCH /api/emergency-requests/:id/complete
+// @access  Doctor (must be assigned to this emergency)
+// ─────────────────────────────────────────────────────────────────────────────
+const completeEmergency = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // ── 1. Validate ObjectId ───────────────────────────────────────────────
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid emergency request ID" });
+    }
+
+    // ── 2. Fetch the emergency ─────────────────────────────────────────────
+    const request = await EmergencyRequest.findById(id);
+    if (!request) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Emergency request not found" });
+    }
+
+    // ── 3. Verify doctor is assigned ───────────────────────────────────────
+    const isAssigned = request.assignedDoctors.some(
+      (d) => d.doctor.toString() === req.user._id.toString()
+    );
+    if (!isAssigned) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied — you are not assigned to this emergency",
+      });
+    }
+
+    // ── 4. Enforce status precondition ─────────────────────────────────────
+    if (request.status !== "In Progress") {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot complete treatment — current status is "${request.status}". Expected "In Progress".`,
+      });
+    }
+
+    // ── 5. Update status and timeline ──────────────────────────────────────
+    // resolvedAt is auto-set by the EmergencyRequest pre-save hook
+    // when status becomes "Completed" — no manual assignment needed.
+    request.status = "Completed";
+    request.timeline.push({
+      status:    "Completed",
+      changedBy: req.user._id,
+      note:      "Treatment completed by assigned doctor",
+      changedAt: new Date(),
+    });
+
+    await request.save(); // pre-save hook sets resolvedAt here
+
+    // ── 6. Notify manager (DB + Socket.IO) ────────────────────────────────
+    const managerId = request.requestedBy.toString();
+
+    await notifyUser({
+      recipient:        managerId,
+      emergencyRequest: request._id,
+      title:            "Treatment Completed",
+      message:          "Doctor has completed treatment for emergency case",
+      type:             "EmergencyCompleted",
+      createdBy:        req.user._id,
+      socketEvent:      "notification:new",
+    });
+
+    // ── 7. Audit log ───────────────────────────────────────────────────────
+    await createAuditLog({
+      user:        req.user._id,
+      action:      "STATUS_CHANGE",
+      entityType:  "EmergencyRequest",
+      entityId:    request._id,
+      description: "Doctor completed treatment — status changed to Completed",
+      metadata: {
+        doctorId:       req.user._id,
+        previousStatus: "In Progress",
+        newStatus:      "Completed",
+        resolvedAt:     request.resolvedAt,
+      },
+      changeDiff: {
+        before: { status: "In Progress" },
+        after:  { status: "Completed", resolvedAt: request.resolvedAt },
+      },
+      status:    "SUCCESS",
+      riskLevel: "Low",
+      req,
+    });
+
+    // ── 8. Return populated response ───────────────────────────────────────
+    const populated = await populateRequest(EmergencyRequest.findById(request._id));
+
+    return res.status(200).json({
+      success: true,
+      message: "Emergency treatment completed successfully",
+      data:    populated,
+    });
+  } catch (error) {
+    console.error("completeEmergency error:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Server error", error: error.message });
+  }
+};
+
 module.exports = {
   createEmergencyRequest,
   getAllEmergencyRequests,
@@ -462,4 +715,6 @@ module.exports = {
   updateEmergencyRequest,
   assignDoctors,
   updateEmergencyStatus,
+  startEmergency,
+  completeEmergency,
 };

@@ -9,9 +9,11 @@ const {
   updateEmergencyRequest,
   assignDoctors,
   updateEmergencyStatus,
+  startEmergency,
+  completeEmergency,
 } = require("../controllers/emergencyRequestController");
 
-const protect = require("../middlewares/authMiddleware");
+const protect        = require("../middlewares/authMiddleware");
 const authorizeRoles = require("../middlewares/roleMiddleware");
 
 // ─────────────────────────────────────────────
@@ -117,6 +119,22 @@ router.patch(
   protect,
   authorizeRoles("manager", "doctor"),
   updateEmergencyStatus
+);
+
+// PATCH  /api/emergency-requests/:id/start  (Doctor — must be assigned)
+router.patch(
+  "/:id/start",
+  protect,
+  authorizeRoles("doctor"),
+  startEmergency
+);
+
+// PATCH  /api/emergency-requests/:id/complete  (Doctor — must be assigned)
+router.patch(
+  "/:id/complete",
+  protect,
+  authorizeRoles("doctor"),
+  completeEmergency
 );
 
 module.exports = router;
