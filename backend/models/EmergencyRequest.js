@@ -16,13 +16,28 @@ const mongoose = require("mongoose");
  */
 const SPECIALIZATIONS = [
   "Cardiology",
-  "Neurology",
-  "Neurosurgery",
-  "Orthopedics",
-  "Anesthesiology",
-  "Critical Care",
-  "Pediatrics",
-  "General Surgery",
+"Neurology",
+"Neurosurgery",
+"Orthopedics",
+"Anesthesiology",
+"Critical Care",
+"Pediatrics",
+"General Surgery",
+"Gynecology",
+"Urology",
+"Emergency Medicine",
+"Dermatology",
+"Psychiatry",
+"ENT",
+"Ophthalmology",
+"Pulmonology",
+"Nephrology",
+"Gastroenterology",
+"Oncology",
+"Radiology",
+"Pathology",
+"Plastic Surgery",
+"Dentistry"
 ];
 
 /**
@@ -77,35 +92,32 @@ const doctorResponseSchema = new mongoose.Schema(
     // ── Accept-specific fields ────────────────
     // Estimated time of arrival in minutes (optional, doctor-provided)
     eta: {
-      type: Number,
-      min: [1, "ETA must be at least 1 minute"],
-      max: [480, "ETA cannot exceed 480 minutes (8 hours)"],
-      default: null,
-    },
+  type: Number,
+  min: 1,
+  max: 480,
+},
 
     // ── Decline-specific fields ───────────────
     // Structured reason for declining (drives analytics without free-text noise)
     reasonType: {
-      type: String,
-      enum: {
-        values: [
-          "Unavailable",        // Doctor is currently busy / on-call elsewhere
-          "OutOfSpecialization", // Emergency outside doctor's area of expertise
-          "TooFar",             // Hospital location not reachable in time
-          "Other",              // Custom reason provided in customReason
-        ],
-        message: "Invalid reasonType value",
-      },
-      default: null,
-    },
+  type: String,
+  enum: {
+    values: [
+      "Unavailable",
+      "OutOfSpecialization",
+      "TooFar",
+      "Other",
+    ],
+    message: "Invalid reasonType value",
+  },
+},
 
     // Free-text reason — required when reasonType is "Other"
     customReason: {
-      type: String,
-      trim: true,
-      maxlength: [300, "customReason cannot exceed 300 characters"],
-      default: "",
-    },
+  type: String,
+  trim: true,
+  maxlength: 300,
+},
 
     // When the doctor submitted their response
     respondedAt: {

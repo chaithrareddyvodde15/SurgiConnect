@@ -3,6 +3,7 @@
 const mongoose            = require("mongoose");
 const { validationResult } = require("express-validator");
 
+const Hospital = require("../models/Hospital");
 const EmergencyRequest   = require("../models/EmergencyRequest");
 const Notification       = require("../models/Notification");
 const Doctor             = require("../models/doctorModel");
@@ -92,9 +93,11 @@ const createEmergencyRequest = async (req, res) => {
   try {
     const errors = getValidationErrors(req);
     if (errors) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Validation failed", errors });
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors,
+      });
     }
 
     const {
@@ -109,7 +112,17 @@ const createEmergencyRequest = async (req, res) => {
       requiredSpecialization,
     } = req.body;
 
-    // ── 1. Create the emergency request ───────────────────────────────────
+    // Verify hospital exists
+    const hospitalExists = await Hospital.findById(hospital);
+
+    if (!hospitalExists) {
+      return res.status(404).json({
+        success: false,
+        message: "Hospital not found",
+      });
+    }
+
+    // Create emergency request
     const request = await EmergencyRequest.create({
       patientName,
       patientAge,
@@ -124,99 +137,101 @@ const createEmergencyRequest = async (req, res) => {
       status: "Pending",
       timeline: [
         {
-          status:    "Pending",
+          status: "Pending",
           changedBy: req.user._id,
-          note:      "Emergency request created",
+          note: "Emergency request created by hospital",
           changedAt: new Date(),
         },
       ],
     });
 
-    // ── 2. Audit log ──────────────────────────────────────────────────────
+    // Audit Log
     await createAuditLog({
-      user:        req.user._id,
-      action:      "CREATE",
-      entityType:  "EmergencyRequest",
-      entityId:    request._id,
-      description: `Emergency request created — ${emergencyType} | Severity: ${severity} | Specialization: ${requiredSpecialization}`,
+      user: req.user._id,
+      action: "CREATE",
+      entityType: "EmergencyRequest",
+      entityId: request._id,
+      description: `Emergency request created - ${emergencyType}`,
       metadata: {
         severity,
         emergencyType,
         requiredSpecialization,
         hospitalId: hospital,
       },
-      status:    "SUCCESS",
-      riskLevel: severity === "Critical" ? "Critical" : severity === "High" ? "High" : "Medium",
+      status: "SUCCESS",
+      riskLevel:
+        severity === "Critical"
+          ? "Critical"
+          : severity === "High"
+          ? "High"
+          : "Medium",
       req,
     });
 
-    // ── 3. Find doctors matching the required specialization ──────────────
-    //
-    // Query Doctor model for verified, available doctors whose specialization
-    // matches. We do NOT broadcast to every doctor — only matched ones.
-    //
-    // Availability check: "Available" or "On-Call" doctors receive the alert.
-    // "Unavailable" doctors are excluded to reduce noise.
+    // Find matching doctors
     const matchedDoctors = await Doctor.find({
       specialization: requiredSpecialization,
-      verified:       true,
-      availability:   { $in: ["Available", "On-Call"] },
-    })
-      .select("userId specialization availability")
-      .lean();
+      verified: true,
+      availability: {
+        $in: ["Available", "On-Call"],
+      },
+    }).select("userId specialization availability");
 
-    // ── 4. Broadcast emergency to each matched doctor (DB + Socket.IO) ────
+    // Send notification to doctors
     if (matchedDoctors.length > 0) {
-      const broadcastTitle   = `🚨 Emergency: ${emergencyType}`;
-      const broadcastMessage =
-        `A ${severity} severity emergency requires a ${requiredSpecialization} specialist. ` +
-        `Patient: ${patientName}, ${patientAge} years old. ` +
-        `Please respond to accept or decline.`;
+      const title = `🚨 Emergency: ${emergencyType}`;
+
+      const message =
+        `A ${severity} severity emergency requires a ${requiredSpecialization} specialist.\n` +
+        `Patient: ${patientName}, ${patientAge} years old.\n` +
+        `Please respond immediately.`;
 
       await Promise.all(
-        matchedDoctors.map((doc) =>
+        matchedDoctors.map((doctor) =>
           notifyUser({
-            recipient:        doc.userId,
+            recipient: doctor.userId,
             emergencyRequest: request._id,
-            title:            broadcastTitle,
-            message:          broadcastMessage,
-            type:             "EmergencyBroadcast",
-            createdBy:        req.user._id,
-            socketEvent:      "emergency:new",  // doctors listen for this event
+            title,
+            message,
+            type: "EmergencyBroadcast",
+            createdBy: req.user._id,
+            socketEvent: "emergency:new",
           })
         )
       );
 
       console.log(
-        `[Emergency] Broadcast sent to ${matchedDoctors.length} doctor(s) ` +
-        `for specialization: ${requiredSpecialization}`
+        `Emergency broadcast sent to ${matchedDoctors.length} doctors.`
       );
     } else {
-      console.warn(
-        `[Emergency] No available doctors found for specialization: ${requiredSpecialization}`
+      console.log(
+        `No available doctor found for specialization ${requiredSpecialization}`
       );
     }
 
-    // ── 5. Return populated response ──────────────────────────────────────
-    const populated = await populateRequest(EmergencyRequest.findById(request._id));
+    const populatedRequest = await populateRequest(
+      EmergencyRequest.findById(request._id)
+    );
 
     return res.status(201).json({
       success: true,
       message: "Emergency request created successfully",
-      data:    populated,
+      data: populatedRequest,
       broadcast: {
         specialization: requiredSpecialization,
         doctorsNotified: matchedDoctors.length,
       },
     });
   } catch (error) {
-    console.error("createEmergencyRequest error:", error);
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error", error: error.message });
+    console.error("createEmergencyRequest:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
   }
 };
-
 // ─────────────────────────────────────────────
 // @desc    Get all emergency requests (filtered + paginated)
 // @route   GET /api/emergency-requests
@@ -623,31 +638,54 @@ const respondToEmergency = async (req, res) => {
     const { id } = req.params;
     const { action, eta, reasonType, customReason } = req.body;
 
-    // ── 1. Validate ObjectId ──────────────────────────────────────────────
+    // Validate Emergency Request ID
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid emergency request ID" });
-    }
-
-    // ── 2. Validate action ────────────────────────────────────────────────
-    if (!action || !["Accepted", "Declined"].includes(action)) {
       return res.status(400).json({
         success: false,
-        message: "action must be either Accepted or Declined",
+        message: "Invalid emergency request ID",
       });
     }
 
-    // ── 3. Validate decline-specific fields ───────────────────────────────
-    if (action === "Declined") {
-      const validReasonTypes = ["Unavailable", "OutOfSpecialization", "TooFar", "Other"];
-      if (!reasonType || !validReasonTypes.includes(reasonType)) {
+    // Validate action
+    if (!["Accepted", "Declined"].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        message: "action must be Accepted or Declined",
+      });
+    }
+
+    // Validate ETA
+    if (action === "Accepted" && eta !== undefined) {
+      const etaNumber = Number(eta);
+
+      if (!Number.isInteger(etaNumber) || etaNumber < 1 || etaNumber > 480) {
         return res.status(400).json({
           success: false,
-          message: `reasonType is required for Declined and must be one of: ${validReasonTypes.join(", ")}`,
+          message: "eta must be between 1 and 480 minutes",
         });
       }
-      if (reasonType === "Other" && (!customReason || customReason.trim() === "")) {
+    }
+
+    // Validate decline reason
+    if (action === "Declined") {
+      const validReasons = [
+        "Unavailable",
+        "OutOfSpecialization",
+        "TooFar",
+        "Other",
+      ];
+
+      if (!reasonType || !validReasons.includes(reasonType)) {
+        return res.status(400).json({
+          success: false,
+          message: `reasonType must be one of: ${validReasons.join(", ")}`,
+        });
+      }
+
+      if (
+        reasonType === "Other" &&
+        (!customReason || customReason.trim() === "")
+      ) {
         return res.status(400).json({
           success: false,
           message: "customReason is required when reasonType is Other",
@@ -655,42 +693,30 @@ const respondToEmergency = async (req, res) => {
       }
     }
 
-    // ── 4. Validate accept-specific fields ────────────────────────────────
-    if (action === "Accepted" && eta !== undefined) {
-      const etaNum = Number(eta);
-      if (!Number.isInteger(etaNum) || etaNum < 1 || etaNum > 480) {
-        return res.status(400).json({
-          success: false,
-          message: "eta must be an integer between 1 and 480 minutes",
-        });
-      }
-    }
-
-    // ── 5. Fetch emergency ────────────────────────────────────────────────
+    // Fetch emergency
     const request = await EmergencyRequest.findById(id);
-    if (!request) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Emergency request not found" });
-    }
 
-    // ── 6. Guard: only respond to Pending or Accepted requests ────────────
-    //    Pending  → doctors can still respond (first response moves to Accepted)
-    //    Accepted → other doctors can still decline; more acceptances allowed
-    //    Confirmed / beyond → no more responses accepted
-    const respondableStatuses = ["Pending", "Accepted"];
-    if (!respondableStatuses.includes(request.status)) {
-      return res.status(400).json({
+    if (!request) {
+      return res.status(404).json({
         success: false,
-        message: `Cannot respond to a request with status "${request.status}". ` +
-                 `Responses are only accepted when status is Pending or Accepted.`,
+        message: "Emergency request not found",
       });
     }
 
-    // ── 7. Guard: verify doctor hasn't already responded ──────────────────
+    // Only Pending / Accepted can receive responses
+    if (!["Pending", "Accepted"].includes(request.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot respond when request status is ${request.status}`,
+      });
+    }
+
+    // Doctor already responded?
     const alreadyResponded = request.doctorResponses.some(
-      (r) => r.doctor.toString() === req.user._id.toString()
+      (response) =>
+        response.doctor.toString() === req.user._id.toString()
     );
+
     if (alreadyResponded) {
       return res.status(409).json({
         success: false,
@@ -698,101 +724,107 @@ const respondToEmergency = async (req, res) => {
       });
     }
 
-    // ── 8. Build the response entry ───────────────────────────────────────
-    const responseEntry = {
-      doctor:      req.user._id,
+    // Build response
+    const doctorResponse = {
+      doctor: req.user._id,
       action,
       respondedAt: new Date(),
     };
 
-    if (action === "Accepted" && eta) {
-      responseEntry.eta = Number(eta);
+    if (action === "Accepted") {
+      doctorResponse.eta = eta ? Number(eta) : undefined;
+    } else {
+      doctorResponse.reasonType = reasonType;
+      doctorResponse.customReason = customReason || "";
     }
 
-    if (action === "Declined") {
-      responseEntry.reasonType   = reasonType;
-      responseEntry.customReason = customReason || "";
-    }
-
-    // ── 9. Push response and update status if first acceptance ────────────
-    request.doctorResponses.push(responseEntry);
+    request.doctorResponses.push(doctorResponse);
 
     const previousStatus = request.status;
 
     if (action === "Accepted" && request.status === "Pending") {
-      // First doctor to accept — move to Accepted so hospital can see live responses
       request.status = "Accepted";
+
       request.timeline.push({
-        status:    "Accepted",
+        status: "Accepted",
         changedBy: req.user._id,
-        note:      `Dr. ${req.user.name || req.user._id} accepted the emergency`,
+        note: "Doctor accepted emergency request",
         changedAt: new Date(),
       });
     }
 
     await request.save();
 
-    // ── 10. Notify manager in real-time ───────────────────────────────────
-    const managerId = request.requestedBy.toString();
+    // Notify hospital
+    const title =
+      action === "Accepted"
+        ? "Doctor Accepted Emergency"
+        : "Doctor Declined Emergency";
 
-    const notifTitle   = action === "Accepted"
-      ? "Doctor Accepted Emergency"
-      : "Doctor Declined Emergency";
-
-    const notifMessage = action === "Accepted"
-      ? `A ${request.requiredSpecialization} specialist has accepted your emergency request` +
-        (eta ? ` and will arrive in approximately ${eta} minute(s).` : ".")
-      : `A ${request.requiredSpecialization} specialist declined your emergency request` +
-        ` (Reason: ${reasonType === "Other" ? customReason : reasonType}).`;
+    const message =
+      action === "Accepted"
+        ? `A ${request.requiredSpecialization} specialist accepted your emergency request${
+            eta ? ` (ETA: ${eta} minutes)` : ""
+          }.`
+        : `A ${request.requiredSpecialization} specialist declined your emergency request. Reason: ${
+            reasonType === "Other" ? customReason : reasonType
+          }.`;
 
     await notifyUser({
-      recipient:        managerId,
+      recipient: request.requestedBy,
       emergencyRequest: request._id,
-      title:            notifTitle,
-      message:          notifMessage,
-      type:             "DoctorResponded",
-      createdBy:        req.user._id,
-      socketEvent:      "emergency:response",  // hospital listens for this
+      title,
+      message,
+      type: "DoctorResponded",
+      createdBy: req.user._id,
+      socketEvent: "emergency:response",
     });
 
-    // ── 11. Audit log ─────────────────────────────────────────────────────
+    // Audit Log
     await createAuditLog({
-      user:        req.user._id,
-      action:      "UPDATE",
-      entityType:  "EmergencyRequest",
-      entityId:    request._id,
-      description: `Doctor ${action.toLowerCase()} emergency request` +
-                   (action === "Declined" ? ` — Reason: ${reasonType}` : ""),
+      user: req.user._id,
+      action: "UPDATE",
+      entityType: "EmergencyRequest",
+      entityId: request._id,
+      description: `Doctor ${action.toLowerCase()} emergency request`,
       metadata: {
-        doctorId:       req.user._id,
+        doctorId: req.user._id,
         action,
-        eta:            action === "Accepted" ? eta : undefined,
-        reasonType:     action === "Declined" ? reasonType : undefined,
-        customReason:   action === "Declined" && reasonType === "Other" ? customReason : undefined,
+        eta,
+        reasonType,
+        customReason,
         previousStatus,
-        newStatus:      request.status,
+        newStatus: request.status,
       },
-      changeDiff: previousStatus !== request.status
-        ? { before: { status: previousStatus }, after: { status: request.status } }
-        : undefined,
-      status:    "SUCCESS",
+      changeDiff:
+        previousStatus !== request.status
+          ? {
+              before: { status: previousStatus },
+              after: { status: request.status },
+            }
+          : undefined,
+      status: "SUCCESS",
       riskLevel: "Medium",
       req,
     });
 
-    // ── 12. Return populated response ─────────────────────────────────────
-    const populated = await populateRequest(EmergencyRequest.findById(request._id));
+    const populatedRequest = await populateRequest(
+      EmergencyRequest.findById(request._id)
+    );
 
     return res.status(200).json({
       success: true,
-      message: `Response recorded: ${action}`,
-      data:    populated,
+      message: `Doctor ${action.toLowerCase()} the emergency request successfully`,
+      data: populatedRequest,
     });
   } catch (error) {
     console.error("respondToEmergency error:", error);
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error", error: error.message });
+
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
   }
 };
 
@@ -816,152 +848,212 @@ const confirmDoctor = async (req, res) => {
     const { id } = req.params;
     const { doctorId, role } = req.body;
 
-    // ── 1. Validate IDs ───────────────────────────────────────────────────
+    console.log("\n================ CONFIRM DOCTOR =================");
+    console.log("Emergency ID:", id);
+    console.log("Request Body:", req.body);
+    console.log("Doctor ID from body:", doctorId);
+    console.log("Doctor ID type:", typeof doctorId);
+
+    // Validate IDs
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid emergency request ID" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid emergency request ID",
+      });
     }
 
     if (!doctorId || !mongoose.Types.ObjectId.isValid(doctorId)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "doctorId is required and must be a valid MongoDB ID" });
+      return res.status(400).json({
+        success: false,
+        message: "doctorId must be a valid MongoDB ID",
+      });
     }
 
-    // ── 2. Fetch emergency ────────────────────────────────────────────────
+    // Fetch Emergency Request
     const request = await EmergencyRequest.findById(id);
+
     if (!request) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Emergency request not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Emergency request not found",
+      });
     }
 
-    // ── 3. Guard: must be in Accepted state ───────────────────────────────
+    console.log("Emergency Request Found:", request._id);
+
+    // Emergency must already have accepted responses
     if (request.status !== "Accepted") {
       return res.status(400).json({
         success: false,
-        message: `Cannot confirm a doctor on a request with status "${request.status}". ` +
-                 `Status must be Accepted.`,
+        message: `Cannot confirm a doctor when emergency status is "${request.status}"`,
       });
     }
 
-    // ── 4. Guard: target doctor must have accepted ────────────────────────
-    const doctorResponse = request.doctorResponses.find(
-      (r) =>
-        r.doctor.toString() === doctorId.toString() &&
-        r.action === "Accepted"
-    );
+    // ---------------- DEBUG ----------------
 
-    if (!doctorResponse) {
+    console.log("\nSearching Doctor collection...");
+
+    const doctor = await Doctor.findOne({
+      userId: new mongoose.Types.ObjectId(doctorId),
+    });
+
+    console.log("Doctor Query Result:");
+    console.log(doctor);
+
+    const allDoctors = await Doctor.find();
+
+    console.log("\nAll Doctors in Database:");
+    allDoctors.forEach((doc) => {
+      console.log({
+        doctorDocumentId: doc._id.toString(),
+        userId: doc.userId.toString(),
+        specialization: doc.specialization,
+      });
+    });
+
+    // --------------------------------------
+
+    if (!doctor) {
       return res.status(404).json({
         success: false,
-        message:
-          "The specified doctor has not accepted this emergency request. " +
-          "Only doctors who accepted can be confirmed.",
+        message: "Doctor not found",
       });
     }
 
-    // ── 5. Guard: doctor not already confirmed ────────────────────────────
+    console.log("Doctor found successfully.");
+
+    // Verify doctor accepted the request
+    const doctorResponse = request.doctorResponses.find(
+      (response) =>
+        response.doctor.toString() === doctorId.toString() &&
+        response.action === "Accepted"
+    );
+
+    console.log("Doctor Response:");
+    console.log(doctorResponse);
+
+    if (!doctorResponse) {
+      return res.status(400).json({
+        success: false,
+        message: "Doctor has not accepted this emergency request",
+      });
+    }
+
+    // Prevent duplicate confirmation
     if (
       request.confirmedDoctor &&
       request.confirmedDoctor.toString() === doctorId.toString()
     ) {
       return res.status(409).json({
         success: false,
-        message: "This doctor is already confirmed for this emergency",
+        message: "Doctor has already been confirmed",
       });
     }
 
-    // ── 6. Mark as Confirmed and record confirmedDoctor ───────────────────
-    const previousStatus         = request.status;
-    request.status               = "Confirmed";
-    request.confirmedDoctor      = doctorId;
+    const previousStatus = request.status;
+
+    // Save confirmed doctor
+    request.confirmedDoctor = doctorId;
 
     request.timeline.push({
-      status:    "Confirmed",
+      status: "Confirmed",
       changedBy: req.user._id,
-      note:      `Doctor confirmed by hospital manager` +
-                 (doctorResponse.eta ? ` — ETA: ${doctorResponse.eta} minute(s)` : ""),
+      note:
+        "Doctor confirmed by hospital" +
+        (doctorResponse.eta
+          ? ` (ETA: ${doctorResponse.eta} minutes)`
+          : ""),
       changedAt: new Date(),
     });
 
-    // ── 7. Formally assign the doctor (reuse existing mechanism) ──────────
-    // This mirrors doctorAssignmentController.assignDoctorsToRequest logic:
-    //   push into assignedDoctors[], advance status to Assigned, add timeline entry
+    // Assign doctor
     const alreadyAssigned = request.assignedDoctors.some(
-      (d) => d.doctor.toString() === doctorId.toString()
+      (assignment) =>
+        assignment.doctor.toString() === doctorId.toString()
     );
 
     if (!alreadyAssigned) {
       request.assignedDoctors.push({
-        doctor:     doctorId,
-        role:       role || "",
+        doctor: doctorId,
+        role: role || "",
         assignedBy: req.user._id,
         assignedAt: new Date(),
       });
     }
 
-    // Advance to Assigned (the downstream state after Confirmed)
     request.status = "Assigned";
+
     request.timeline.push({
-      status:    "Assigned",
+      status: "Assigned",
       changedBy: req.user._id,
-      note:      "Doctor formally assigned following hospital confirmation",
+      note: "Doctor assigned by hospital",
       changedAt: new Date(),
     });
 
     await request.save();
 
-    // ── 8. Notify the confirmed doctor ────────────────────────────────────
+    // Notify doctor
     await notifyUser({
-      recipient:        doctorId,
+      recipient: doctorId,
       emergencyRequest: request._id,
-      title:            "You Have Been Confirmed",
-      message:
-        `The hospital has confirmed you for a ${request.severity} severity ` +
-        `${request.emergencyType} emergency. Please proceed immediately.`,
-      type:        "DoctorConfirmed",
-      createdBy:   req.user._id,
-      socketEvent: "emergency:confirmed",  // doctor listens for this event
+      title: "Emergency Assignment Confirmed",
+      message: `You have been assigned to a ${request.severity} severity ${request.emergencyType} emergency.`,
+      type: "DoctorConfirmed",
+      createdBy: req.user._id,
+      socketEvent: "emergency:confirmed",
     });
 
-    // ── 9. Audit log ──────────────────────────────────────────────────────
+    // Audit Log
     await createAuditLog({
-      user:        req.user._id,
-      action:      "ASSIGN",
-      entityType:  "EmergencyRequest",
-      entityId:    request._id,
-      description: `Hospital confirmed doctor — emergency formally assigned`,
+      user: req.user._id,
+      action: "ASSIGN",
+      entityType: "EmergencyRequest",
+      entityId: request._id,
+      description: "Hospital confirmed and assigned doctor",
       metadata: {
-        confirmedDoctorId: doctorId,
-        role:              role || "",
-        eta:               doctorResponse.eta || null,
+        doctorId,
+        role: role || "",
+        eta: doctorResponse.eta || null,
         previousStatus,
-        newStatus:         "Assigned",
+        newStatus: "Assigned",
       },
       changeDiff: {
-        before: { status: previousStatus,  confirmedDoctor: null },
-        after:  { status: "Assigned",      confirmedDoctor: doctorId },
+        before: {
+          status: previousStatus,
+          confirmedDoctor: null,
+        },
+        after: {
+          status: "Assigned",
+          confirmedDoctor: doctorId,
+        },
       },
-      status:    "SUCCESS",
+      status: "SUCCESS",
       riskLevel: "High",
       req,
     });
 
-    // ── 10. Return populated response ─────────────────────────────────────
-    const populated = await populateRequest(EmergencyRequest.findById(request._id));
+    const populatedRequest = await populateRequest(
+      EmergencyRequest.findById(request._id)
+    );
+
+    console.log("\nDoctor confirmed successfully.");
+    console.log("=================================================\n");
 
     return res.status(200).json({
       success: true,
-      message: "Doctor confirmed and assigned successfully",
-      data:    populated,
+      message: "Doctor confirmed successfully",
+      data: populatedRequest,
     });
   } catch (error) {
-    console.error("confirmDoctor error:", error);
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error", error: error.message });
+    console.error("\n================ ERROR =================");
+    console.error(error);
+    console.error("========================================\n");
+
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
   }
 };
 

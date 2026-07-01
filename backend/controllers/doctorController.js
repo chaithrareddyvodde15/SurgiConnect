@@ -25,14 +25,36 @@ const Hospital = require("../models/Hospital");
 // Shared constants
 // ─────────────────────────────────────────────
 const VALID_SPECIALIZATIONS = [
+  "General Medicine",
   "Cardiology",
   "Neurology",
   "Neurosurgery",
   "Orthopedics",
+  "General Surgery",
+  "Plastic Surgery",
+  "Cardiothoracic Surgery",
+  "Pediatrics",
+  "Gynecology",
+  "Obstetrics",
+  "Dermatology",
+  "Psychiatry",
+  "Pulmonology",
+  "Nephrology",
+  "Gastroenterology",
+  "Endocrinology",
+  "Oncology",
+  "Hematology",
+  "Urology",
+  "Ophthalmology",
+  "ENT",
   "Anesthesiology",
   "Critical Care",
-  "Pediatrics",
-  "General Surgery",
+  "Emergency Medicine",
+  "Radiology",
+  "Pathology",
+  "Rheumatology",
+  "Infectious Diseases",
+  "Family Medicine"
 ];
 
 const VALID_AVAILABILITY = ["Available", "Unavailable", "On-Call"];
@@ -320,7 +342,7 @@ exports.getDoctorById = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 exports.updateDoctorProfile = async (req, res) => {
   try {
-    const { specialization, fee, name, phone } = req.body;
+    const { specialization, fee, name, phone, availability } = req.body;
 
     // ─────────────────────────────────────────────────────────────
     // Validate specialization
@@ -347,6 +369,20 @@ exports.updateDoctorProfile = async (req, res) => {
           message: "fee must be a non-negative number",
         });
       }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Validate availability
+    // ─────────────────────────────────────────────────────────────
+    if (
+      availability !== undefined &&
+      !["Available", "Unavailable", "On-Call"].includes(availability)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "availability must be Available, Unavailable or On-Call",
+      });
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -383,7 +419,7 @@ exports.updateDoctorProfile = async (req, res) => {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // Prepare updates
+    // Prepare Doctor Updates
     // ─────────────────────────────────────────────────────────────
     const doctorUpdate = {};
 
@@ -393,6 +429,12 @@ exports.updateDoctorProfile = async (req, res) => {
     if (fee !== undefined)
       doctorUpdate.fee = Number(fee);
 
+    if (availability !== undefined)
+      doctorUpdate.availability = availability;
+
+    // ─────────────────────────────────────────────────────────────
+    // Prepare User Updates
+    // ─────────────────────────────────────────────────────────────
     const userUpdate = {};
 
     if (name !== undefined)
@@ -402,29 +444,34 @@ exports.updateDoctorProfile = async (req, res) => {
       userUpdate.phone = phone.trim();
 
     // ─────────────────────────────────────────────────────────────
-    // Update Doctor Profile
+    // Find Existing Doctor Profile
+    // If it doesn't exist, create it automatically
     // ─────────────────────────────────────────────────────────────
-    const doctor = await Doctor.findOneAndUpdate(
-      { userId: req.user._id },
-      { $set: doctorUpdate },
-      {
-        new: true,
-        runValidators: true,
-      }
-    ).populate(
-      "userId",
-      "name email phone role isActive createdAt"
-    );
+    let doctor = await Doctor.findOne({ userId: req.user._id });
 
     if (!doctor) {
-      return res.status(404).json({
-        success: false,
-        message: "Doctor profile not found",
+      doctor = await Doctor.create({
+        userId: req.user._id,
+        specialization: doctorUpdate.specialization || "",
+        fee: doctorUpdate.fee || 0,
+        availability: doctorUpdate.availability || "Unavailable",
+        verified: true,
       });
+    } else {
+      if (doctorUpdate.specialization !== undefined)
+        doctor.specialization = doctorUpdate.specialization;
+
+      if (doctorUpdate.fee !== undefined)
+        doctor.fee = doctorUpdate.fee;
+
+      if (doctorUpdate.availability !== undefined)
+        doctor.availability = doctorUpdate.availability;
+
+      await doctor.save();
     }
 
     // ─────────────────────────────────────────────────────────────
-    // Update User Profile
+    // Update User Details
     // ─────────────────────────────────────────────────────────────
     if (Object.keys(userUpdate).length > 0) {
       await User.findByIdAndUpdate(
@@ -439,7 +486,9 @@ exports.updateDoctorProfile = async (req, res) => {
       );
     }
 
-    // Fetch latest profile
+    // ─────────────────────────────────────────────────────────────
+    // Return Latest Doctor Profile
+    // ─────────────────────────────────────────────────────────────
     const updatedDoctor = await Doctor.findById(doctor._id).populate(
       "userId",
       "name email phone role isActive createdAt"
