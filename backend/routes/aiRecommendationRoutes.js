@@ -52,7 +52,7 @@ const previewValidation = [
 router.post(
   "/recommend",
   protect,
-  authorizeRoles("manager"),
+  authorizeRoles("hospital"),
   generateValidation,
   generateRecommendation
 );
@@ -62,7 +62,7 @@ router.post(
 router.post(
   "/preview",
   protect,
-  authorizeRoles("manager"),
+  authorizeRoles("hospital"),
   previewValidation,
   previewRecommendation
 );
@@ -72,7 +72,7 @@ router.post(
 router.patch(
   "/refresh/:emergencyRequestId",
   protect,
-  authorizeRoles("manager"),
+  authorizeRoles("hospital"),
   refreshRecommendation
 );
 
@@ -81,7 +81,7 @@ router.patch(
 router.get(
   "/doctors/:emergencyRequestId",
   protect,
-  authorizeRoles("manager", "doctor"),
+ authorizeRoles("hospital", "doctor"),
   getMatchingDoctors
 );
 
@@ -90,7 +90,7 @@ router.get(
 router.get(
   "/:emergencyRequestId",
   protect,
-  authorizeRoles("manager", "doctor"),
+  authorizeRoles("hospital", "doctor"),
   getRecommendation
 );
 

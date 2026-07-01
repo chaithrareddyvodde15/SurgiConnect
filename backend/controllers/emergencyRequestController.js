@@ -107,10 +107,19 @@ const createEmergencyRequest = async (req, res) => {
       emergencyType,
       symptoms,
       severity,
-      hospital,
       notes,
       requiredSpecialization,
     } = req.body;
+
+    // Get hospital from logged-in hospital user
+    const hospital = req.user.hospitalId;
+
+    if (!hospital) {
+      return res.status(403).json({
+        success: false,
+        message: "Hospital account is not linked to any hospital profile",
+      });
+    }
 
     // Verify hospital exists
     const hospitalExists = await Hospital.findById(hospital);
@@ -145,7 +154,7 @@ const createEmergencyRequest = async (req, res) => {
       ],
     });
 
-    // Audit Log
+    // Create Audit Log
     await createAuditLog({
       user: req.user._id,
       action: "CREATE",
@@ -177,7 +186,7 @@ const createEmergencyRequest = async (req, res) => {
       },
     }).select("userId specialization availability");
 
-    // Send notification to doctors
+    // Notify matching doctors
     if (matchedDoctors.length > 0) {
       const title = `🚨 Emergency: ${emergencyType}`;
 

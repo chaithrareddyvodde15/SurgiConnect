@@ -743,7 +743,7 @@ const getMatchingDoctors = async (req, res) => {
     if (!isValidObjectId(emergencyRequestId, res, "emergency request ID")) return;
 
     const {
-      page  = 1,
+      page = 1,
       limit = 10,
     } = req.query;
 
@@ -764,85 +764,132 @@ const getMatchingDoctors = async (req, res) => {
       return res.status(400).json({
         success: false,
         message:
-          "No recommendation exists for this request. Generate one first via POST /recommend.",
+          "No AI recommendation exists for this emergency. Generate one first.",
       });
     }
 
-    // Doctor guard — only assigned doctors can view
+    // Doctor guard
     if (req.user.role === "doctor") {
-      const isAssigned = (emergencyRequest.assignedDoctors || []).some(
-        (entry) => entry.doctor?.toString() === req.user._id.toString()
+      const assigned = (emergencyRequest.assignedDoctors || []).some(
+        (d) => d.doctor?.toString() === req.user._id.toString()
       );
-      if (!isAssigned) {
+
+      if (!assigned) {
         return res.status(403).json({
           success: false,
-          message: "Access denied — you are not assigned to this emergency request",
+          message: "You are not assigned to this emergency request.",
         });
       }
     }
 
     const specializations = aiRecommendation.recommendedSpecializations;
-    const hospitalId      = emergencyRequest.hospital;
 
-    // Paginated doctor query
     const skip = (Number(page) - 1) * Number(limit);
 
     const doctorQuery = {
-  specialization: { $in: specializations },
-  availability: "Available",
-  verified: true,
-};
+      specialization: { $in: specializations },
+      availability: "Available",
+      verified: true,
+    };
 
-    
-
-    const [allDoctors, total] = await Promise.all([
+    const [doctors, total] = await Promise.all([
       Doctor.find(doctorQuery)
-        .select("name email specialization availability verified")
+        .populate("userId", "name email phone")
         .skip(skip)
         .limit(Number(limit))
         .lean(),
+
       Doctor.countDocuments(doctorQuery),
     ]);
 
-    // Group by specialization for readability
-    const grouped = {};
-    for (const spec of specializations) {
-      grouped[spec] = allDoctors.filter((d) =>
-        typeof d.specialization === "string"
-          ? d.specialization === spec
-          : Array.isArray(d.specialization) && d.specialization.includes(spec)
-      );
-    }
+    // Smart Ranking
+    const rankedDoctors = await Promise.all(
+      doctors.map(async (doctor) => {
+        let score = 0;
+        const reasons = [];
+
+        // Exact specialization
+        if (specializations.includes(doctor.specialization)) {
+          score += 50;
+          reasons.push("Exact specialization match");
+        }
+
+        // Availability
+        if (doctor.availability === "Available") {
+          score += 20;
+          reasons.push("Available now");
+        }
+
+        // Verified
+        if (doctor.verified) {
+          score += 15;
+          reasons.push("Verified doctor");
+        }
+
+        // Previous assignments
+        const assignments = await EmergencyRequest.countDocuments({
+          "assignedDoctors.doctor": doctor.userId._id,
+        });
+
+        score += Math.min(assignments * 2, 10);
+
+        if (assignments > 0) {
+          reasons.push(`${assignments} previous emergency assignment(s)`);
+        }
+
+        // Lower consultation fee
+        if (doctor.fee <= 1500) {
+          score += 5;
+          reasons.push("Lower consultation fee");
+        }
+
+        return {
+          doctor: {
+            id: doctor.userId._id,
+            name: doctor.userId.name,
+            email: doctor.userId.email,
+            phone: doctor.userId.phone,
+            specialization: doctor.specialization,
+            fee: doctor.fee,
+            availability: doctor.availability,
+            verified: doctor.verified,
+          },
+          matchScore: score,
+          reasons,
+          previousAssignments: assignments,
+        };
+      })
+    );
+
+    rankedDoctors.sort((a, b) => b.matchScore - a.matchScore);
 
     return res.status(200).json({
       success: true,
-      message: "Matching doctors fetched successfully",
+      message: "Ranked matching doctors fetched successfully",
       data: {
         emergencyRequestId,
         recommendedSpecializations: specializations,
-        urgencyScore:  aiRecommendation.urgencyScore,
-        urgencyLabel:  aiRecommendation.urgencyLabel,
-        doctors: {
-          bySpecialization: grouped,
-        },
+        urgencyScore: aiRecommendation.urgencyScore,
+        urgencyLabel: aiRecommendation.urgencyLabel,
+        rankedDoctors,
       },
       pagination: {
         total,
-        page:       Number(page),
-        limit:      Number(limit),
+        page: Number(page),
+        limit: Number(limit),
         totalPages: Math.ceil(total / Number(limit)),
       },
     });
   } catch (error) {
     console.error("getMatchingDoctors error:", error);
+
     return res.status(500).json({
       success: false,
       message: "Server error",
-      error:   error.message,
+      error: error.message,
     });
   }
 };
-
 // ─────────────────────────────────────────────
 // @desc    Preview recommendation without saving
 //          (useful for UI preview before committing)

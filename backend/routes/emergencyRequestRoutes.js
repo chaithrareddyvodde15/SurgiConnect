@@ -1,8 +1,8 @@
 "use strict";
 
-const express = require("express");
-const router = express.Router();
-const { body } = require("express-validator");
+const express    = require("express");
+const router     = express.Router();
+const { body }   = require("express-validator");
 
 const {
   createEmergencyRequest,
@@ -17,11 +17,13 @@ const {
   completeEmergency,
 } = require("../controllers/emergencyRequestController");
 
-const protect = require("../middlewares/authMiddleware");
+const protect        = require("../middlewares/authMiddleware");
 const authorizeRoles = require("../middlewares/roleMiddleware");
 
 // ─────────────────────────────────────────────
-// Specializations
+// Specialization enum — mirrors EmergencyRequest model constant.
+// Kept here so validation stays in sync with route layer.
+// Single source of truth is EmergencyRequest.SPECIALIZATIONS (via statics).
 // ─────────────────────────────────────────────
 const SPECIALIZATIONS = [
   "Cardiology",
@@ -86,12 +88,6 @@ const createValidation = [
     .isIn(["Low", "Medium", "High", "Critical"])
     .withMessage("Severity must be Low, Medium, High, or Critical"),
 
-  body("hospital")
-    .notEmpty()
-    .withMessage("Hospital ID is required")
-    .isMongoId()
-    .withMessage("Invalid hospital ID"),
-
   body("requiredSpecialization")
     .notEmpty()
     .withMessage("requiredSpecialization is required")
@@ -113,121 +109,97 @@ const updateValidation = [
   body("patientName")
     .optional()
     .trim()
-    .isLength({ max: 100 })
-    .withMessage("Patient name cannot exceed 100 characters"),
+    .isLength({ max: 100 }).withMessage("Patient name cannot exceed 100 characters"),
 
   body("patientAge")
     .optional()
-    .isInt({ min: 0, max: 130 })
-    .withMessage("Patient age must be between 0 and 130"),
+    .isInt({ min: 0, max: 130 }).withMessage("Patient age must be between 0 and 130"),
 
   body("gender")
     .optional()
-    .isIn(["Male", "Female", "Other"])
-    .withMessage("Invalid gender value"),
+    .isIn(["Male", "Female", "Other"]).withMessage("Invalid gender value"),
 
   body("severity")
     .optional()
-    .isIn(["Low", "Medium", "High", "Critical"])
-    .withMessage("Invalid severity value"),
+    .isIn(["Low", "Medium", "High", "Critical"]).withMessage("Invalid severity value"),
 
   body("symptoms")
     .optional()
-    .isArray({ min: 1 })
-    .withMessage("At least one symptom is required"),
+    .isArray({ min: 1 }).withMessage("At least one symptom is required"),
 
   body("requiredSpecialization")
     .optional()
     .isIn(SPECIALIZATIONS)
-    .withMessage(
-      `requiredSpecialization must be one of: ${SPECIALIZATIONS.join(", ")}`
-    ),
+    .withMessage(`requiredSpecialization must be one of: ${SPECIALIZATIONS.join(", ")}`),
 
   body("notes")
     .optional()
-    .isLength({ max: 1000 })
-    .withMessage("Notes cannot exceed 1000 characters"),
+    .isLength({ max: 1000 }).withMessage("Notes cannot exceed 1000 characters"),
 ];
 
 // ─────────────────────────────────────────────
-// Doctor Response Validation
+// Validation: Doctor Respond (Accept or Decline)
 // ─────────────────────────────────────────────
 const respondValidation = [
   body("action")
-    .notEmpty()
-    .withMessage("action is required")
+    .notEmpty().withMessage("action is required")
     .isIn(["Accepted", "Declined"])
     .withMessage("action must be Accepted or Declined"),
 
+  // Accept-only: ETA in minutes (optional)
   body("eta")
     .optional()
     .isInt({ min: 1, max: 480 })
-    .withMessage("eta must be between 1 and 480 minutes"),
+    .withMessage("eta must be an integer between 1 and 480 minutes"),
 
+  // Decline-only: structured reason (required when action is Declined)
   body("reasonType")
     .if(body("action").equals("Declined"))
-    .notEmpty()
-    .withMessage("reasonType is required")
+    .notEmpty().withMessage("reasonType is required when action is Declined")
     .isIn(["Unavailable", "OutOfSpecialization", "TooFar", "Other"])
-    .withMessage("Invalid reasonType"),
+    .withMessage("Invalid reasonType value"),
 
+  // customReason: required when reasonType is "Other"
   body("customReason")
     .if(body("reasonType").equals("Other"))
-    .notEmpty()
-    .withMessage("customReason is required")
-    .isLength({ max: 300 })
-    .withMessage("customReason cannot exceed 300 characters"),
+    .notEmpty().withMessage("customReason is required when reasonType is Other")
+    .isLength({ max: 300 }).withMessage("customReason cannot exceed 300 characters"),
 ];
 
 // ─────────────────────────────────────────────
-// Confirm Doctor Validation
+// Validation: Hospital Confirms Doctor
 // ─────────────────────────────────────────────
 const confirmValidation = [
   body("doctorId")
-    .notEmpty()
-    .withMessage("doctorId is required")
-    .isMongoId()
-    .withMessage("doctorId must be a valid MongoDB ID"),
+    .notEmpty().withMessage("doctorId is required")
+    .isMongoId().withMessage("doctorId must be a valid MongoDB ID"),
 
   body("role")
     .optional()
     .trim()
-    .isLength({ max: 100 })
-    .withMessage("role cannot exceed 100 characters"),
+    .isLength({ max: 100 }).withMessage("role cannot exceed 100 characters"),
 ];
 
 // ─────────────────────────────────────────────
 // Routes
 // ─────────────────────────────────────────────
 
+// POST   /api/emergency-requests       → Create  (Manager)
+// GET    /api/emergency-requests       → List    (Manager)
 router
   .route("/")
-  .post(
-    protect,
-    authorizeRoles("hospital"),
-    createValidation,
-    createEmergencyRequest
-  )
-  .get(
-    protect,
-    authorizeRoles("hospital"),
-    getAllEmergencyRequests
-  );
+  .post(protect, authorizeRoles("hospital"), createValidation, createEmergencyRequest)
+  .get(protect, authorizeRoles("hospital"), getAllEmergencyRequests)
 
+// GET    /api/emergency-requests/:id   → Get by ID (Manager, Doctor)
+// PUT    /api/emergency-requests/:id   → Update    (Manager)
 router
   .route("/:id")
-  .get(
-    protect,
-    authorizeRoles("hospital", "doctor"),
-    getEmergencyRequestById
-  )
-  .put(
-    protect,
-    authorizeRoles("hospital"),
-    updateValidation,
-    updateEmergencyRequest
-  );
+  .get(protect, authorizeRoles("hospital", "doctor"), getEmergencyRequestById)
+  .put(protect, authorizeRoles("hospital"), updateValidation, updateEmergencyRequest)
 
+// PATCH  /api/emergency-requests/:id/assign-doctors  (Manager)
+// Legacy endpoint — doctorAssignmentController routes are preferred
 router.patch(
   "/:id/assign-doctors",
   protect,
@@ -235,6 +207,7 @@ router.patch(
   assignDoctors
 );
 
+// PATCH  /api/emergency-requests/:id/status  (Manager, Doctor)
 router.patch(
   "/:id/status",
   protect,
@@ -242,6 +215,10 @@ router.patch(
   updateEmergencyStatus
 );
 
+// POST   /api/emergency-requests/:id/respond  (Doctor)
+// Doctor accepts or declines an emergency request.
+// Only doctors whose specialization matches receive the broadcast;
+// this endpoint enforces that the doctor actually responded.
 router.post(
   "/:id/respond",
   protect,
@@ -250,6 +227,9 @@ router.post(
   respondToEmergency
 );
 
+// PATCH  /api/emergency-requests/:id/confirm-doctor  (Manager)
+// Hospital confirms a specific doctor who accepted.
+// Triggers formal assignment and notifies the doctor.
 router.patch(
   "/:id/confirm-doctor",
   protect,
@@ -258,6 +238,7 @@ router.patch(
   confirmDoctor
 );
 
+// PATCH  /api/emergency-requests/:id/start  (Doctor — must be assigned)
 router.patch(
   "/:id/start",
   protect,
@@ -265,6 +246,7 @@ router.patch(
   startEmergency
 );
 
+// PATCH  /api/emergency-requests/:id/complete  (Doctor — must be assigned)
 router.patch(
   "/:id/complete",
   protect,
