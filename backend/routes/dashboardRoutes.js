@@ -23,7 +23,7 @@ const router = express.Router();
 // Middleware: all dashboard routes require auth + manager role
 // ─────────────────────────────────────────────────────────────────────────────
 router.use(authMiddleware);
-router.use(authorizeRoles("manager"));
+router.use(authorizeRoles("manager", "hospital"));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Reusable validation middleware runner

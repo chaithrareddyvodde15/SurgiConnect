@@ -364,7 +364,12 @@ const getHospitalStats = async (req, res) => {
             as:           "hospitalInfo",
           },
         },
-        { $unwind: { path: "$hospitalInfo", preserveNullAndEmpty: true } },
+        {
+  $unwind: {
+    path: "$hospitalInfo",
+    preserveNullAndEmptyArrays: true
+  },
+},
         {
           $project: {
             hospitalId:       "$_id",
