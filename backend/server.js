@@ -2,9 +2,21 @@ const http = require("http");
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
+const mongoose = require("mongoose");
 const { Server } = require("socket.io");
 
+dotenv.config();
+
 const connectDB = require("./config/db");
+
+// Force load every model
+require("./models/userModel");
+require("./models/doctorModel");
+require("./models/Hospital");
+require("./models/patientModel");
+require("./models/AuditLog");
+require("./models/EmergencyRequest");
+require("./models/Notification");
 
 // Routes
 const authRoutes = require("./routes/authRoutes");
@@ -17,40 +29,27 @@ const auditLogRoutes = require("./routes/auditLogRoutes");
 const aiRecommendationRoutes = require("./routes/aiRecommendationRoutes");
 const doctorAssignmentRoutes = require("./routes/doctorAssignmentRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
+const patientRoutes = require("./routes/patientRoutes");
 
 // Socket
 const { initSocketManager } = require("./socket/socketManager");
 const { registerSocketHandlers } = require("./socket/socketHandlers");
 
-dotenv.config();
-
 const app = express();
 const httpServer = http.createServer(app);
 
-// =======================
-// CORS FIX
-// =======================
-app.use(
-  cors({
+app.use(cors({
     origin: "http://localhost:5173",
     credentials: true,
-  })
-);
+}));
 
-// Middleware
 app.use(express.json());
 
-// =======================
-// Socket.IO
-// =======================
 const io = new Server(httpServer, {
-  cors: {
-    origin: "http://localhost:5173",
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
-    credentials: true,
-  },
-  pingTimeout: 60000,
-  pingInterval: 25000,
+    cors: {
+        origin: "http://localhost:5173",
+        credentials: true,
+    },
 });
 
 app.set("io", io);
@@ -58,9 +57,7 @@ app.set("io", io);
 initSocketManager(io);
 registerSocketHandlers(io);
 
-// =======================
 // Routes
-// =======================
 app.use("/api/auth", authRoutes);
 app.use("/api/doctors", doctorRoutes);
 app.use("/api/managers", managerRoutes);
@@ -71,15 +68,12 @@ app.use("/api/audit-logs", auditLogRoutes);
 app.use("/api/ai-recommendations", aiRecommendationRoutes);
 app.use("/api/assignments", doctorAssignmentRoutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/patients", patientRoutes);
 
-// =======================
-// Start Server
-// =======================
 const PORT = process.env.PORT || 5000;
 
-connectDB();
-
-httpServer.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🔌 Socket.IO listening on ws://localhost:${PORT}`);
+connectDB().then(() => {
+    httpServer.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+    });
 });

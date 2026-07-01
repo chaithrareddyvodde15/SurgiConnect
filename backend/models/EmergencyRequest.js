@@ -1,13 +1,129 @@
 const mongoose = require("mongoose");
 
 // ─────────────────────────────────────────────
+// Constants — single source of truth for enums
+// shared between sub-schemas and the main schema
+// ─────────────────────────────────────────────
+
+/**
+ * Full specialization list.
+ * Matches Hospital.specializations[] exactly so the AI recommendation
+ * module can write to `aiRecommendation.recommendedSpecializations` and
+ * the manager can select from the same set when creating an emergency.
+ *
+ * Future: AI module can populate `requiredSpecialization` automatically
+ * after analyzing `emergencyType` + `symptoms` — no schema change needed.
+ */
+const SPECIALIZATIONS = [
+  "Cardiology",
+  "Neurology",
+  "Neurosurgery",
+  "Orthopedics",
+  "Anesthesiology",
+  "Critical Care",
+  "Pediatrics",
+  "General Surgery",
+];
+
+/**
+ * Status lifecycle:
+ *   Pending → Accepted → Confirmed → Assigned → In Progress → Completed
+ *
+ * Terminal states (no further transitions allowed):
+ *   Completed, Cancelled
+ *
+ * Future states — add here without breaking existing data:
+ *   Expired, Escalated
+ *
+ * Backward-compatible: existing records with "Pending", "Assigned",
+ * "In Progress", "Completed", "Cancelled" remain valid.
+ */
+const EMERGENCY_STATUSES = [
+  "Pending",      // Created by manager; awaiting doctor responses
+  "Accepted",     // At least one doctor has accepted; awaiting hospital confirmation
+  "Confirmed",    // Hospital confirmed a specific doctor; triggers formal assignment
+  "Assigned",     // Doctor formally assigned via doctorAssignmentController
+  "In Progress",  // Doctor started treatment (startEmergency)
+  "Completed",    // Doctor completed treatment (completeEmergency)
+  "Cancelled",    // Cancelled before treatment began
+  // "Expired",   // Future: no doctor responded within SLA window
+  // "Escalated", // Future: escalated to a higher-tier specialist
+];
+
+// ─────────────────────────────────────────────
+// Sub-schema: Individual doctor response
+// Records every doctor's accept or decline for
+// a given emergency request.
+// ─────────────────────────────────────────────
+const doctorResponseSchema = new mongoose.Schema(
+  {
+    // The doctor who responded (User._id with role "doctor")
+    doctor: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+
+    // Whether the doctor accepted or declined
+    action: {
+      type: String,
+      enum: {
+        values: ["Accepted", "Declined"],
+        message: "action must be Accepted or Declined",
+      },
+      required: true,
+    },
+
+    // ── Accept-specific fields ────────────────
+    // Estimated time of arrival in minutes (optional, doctor-provided)
+    eta: {
+      type: Number,
+      min: [1, "ETA must be at least 1 minute"],
+      max: [480, "ETA cannot exceed 480 minutes (8 hours)"],
+      default: null,
+    },
+
+    // ── Decline-specific fields ───────────────
+    // Structured reason for declining (drives analytics without free-text noise)
+    reasonType: {
+      type: String,
+      enum: {
+        values: [
+          "Unavailable",        // Doctor is currently busy / on-call elsewhere
+          "OutOfSpecialization", // Emergency outside doctor's area of expertise
+          "TooFar",             // Hospital location not reachable in time
+          "Other",              // Custom reason provided in customReason
+        ],
+        message: "Invalid reasonType value",
+      },
+      default: null,
+    },
+
+    // Free-text reason — required when reasonType is "Other"
+    customReason: {
+      type: String,
+      trim: true,
+      maxlength: [300, "customReason cannot exceed 300 characters"],
+      default: "",
+    },
+
+    // When the doctor submitted their response
+    respondedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: false } // Embedded sub-docs don't need their own _id
+);
+
+// ─────────────────────────────────────────────
 // Sub-schema: Timeline entry for audit trail
 // ─────────────────────────────────────────────
 const timelineEntrySchema = new mongoose.Schema(
   {
     status: {
       type: String,
-      enum: ["Pending", "Assigned", "In Progress", "Completed", "Cancelled"],
+      enum: EMERGENCY_STATUSES,
       required: true,
     },
     changedBy: {
@@ -30,7 +146,13 @@ const timelineEntrySchema = new mongoose.Schema(
 
 // ─────────────────────────────────────────────
 // Sub-schema: AI recommendation result
-// Kept separate so AI module writes here cleanly
+// Kept separate so the AI module writes here
+// cleanly without touching other fields.
+//
+// Future AI integration:
+//   The AI module can write `recommendedSpecializations[0]` to
+//   `requiredSpecialization` on the parent document after analysis.
+//   No schema change is needed — the slot already exists.
 // ─────────────────────────────────────────────
 const aiRecommendationSchema = new mongoose.Schema(
   {
@@ -78,7 +200,7 @@ const emergencyRequestSchema = new mongoose.Schema(
     patientAge: {
       type: Number,
       required: [true, "Patient age is required"],
-      min: [0,   "Age cannot be negative"],
+      min: [0, "Age cannot be negative"],
       max: [130, "Age cannot exceed 130"],
     },
 
@@ -124,6 +246,27 @@ const emergencyRequestSchema = new mongoose.Schema(
       default: "",
     },
 
+    // ── Required Specialization ──────────────
+    // Selected by the hospital manager at request creation.
+    // Only doctors whose Doctor.specialization matches this value
+    // will receive the real-time emergency broadcast.
+    //
+    // AI integration path (no schema change needed):
+    //   After aiRecommendation is generated, the AI module can suggest
+    //   or override this field by writing:
+    //     request.requiredSpecialization = aiRecommendation.recommendedSpecializations[0]
+    //   This field is intentionally a simple String (not embedded in AI sub-schema)
+    //   so it can be queried efficiently in Doctor.find({ specialization: value }).
+    requiredSpecialization: {
+      type: String,
+      required: [true, "Required specialization is required"],
+      enum: {
+        values: SPECIALIZATIONS,
+        message: `requiredSpecialization must be one of: ${SPECIALIZATIONS.join(", ")}`,
+      },
+      index: true, // queried on every emergency broadcast
+    },
+
     // ── References ───────────────────────────
     hospital: {
       type: mongoose.Schema.Types.ObjectId,
@@ -137,6 +280,26 @@ const emergencyRequestSchema = new mongoose.Schema(
       required: [true, "Requesting user is required"],
     },
 
+    // ── Doctor Responses ─────────────────────
+    // Tracks every doctor's accept / decline for this emergency.
+    // The hospital reads these to decide whom to confirm.
+    // One doctor can only respond once — enforced in the controller.
+    doctorResponses: {
+      type: [doctorResponseSchema],
+      default: [],
+    },
+
+    // ── Confirmed Doctor ─────────────────────
+    // Set when the hospital calls confirmDoctor().
+    // Triggers the existing formal assignment mechanism
+    // (doctorAssignmentController.assignDoctorsToRequest).
+    confirmedDoctor: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+
+    // ── Formal Assignment (existing) ─────────
     assignedDoctors: [
       {
         doctor: {
@@ -154,7 +317,6 @@ const emergencyRequestSchema = new mongoose.Schema(
           required: true,
         },
         role: {
-          // e.g. "Lead Surgeon", "Anesthesiologist"
           type: String,
           trim: true,
           default: "",
@@ -166,10 +328,11 @@ const emergencyRequestSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: {
-        values: ["Pending", "Assigned", "In Progress", "Completed", "Cancelled"],
+        values: EMERGENCY_STATUSES,
         message: "Invalid status value",
       },
       default: "Pending",
+      index: true,
     },
 
     resolvedAt: {
@@ -202,9 +365,10 @@ emergencyRequestSchema.index({ hospital: 1, status: 1 });
 emergencyRequestSchema.index({ requestedBy: 1 });
 emergencyRequestSchema.index({ severity: 1, status: 1 });
 emergencyRequestSchema.index({ createdAt: -1 });
+emergencyRequestSchema.index({ requiredSpecialization: 1, status: 1 }); // broadcast query
 
 // ─────────────────────────────────────────────
-// Pre-save: auto-set resolvedAt when Completed
+// Pre-save: auto-set resolvedAt when terminal
 // ─────────────────────────────────────────────
 emergencyRequestSchema.pre("save", function (next) {
   if (
@@ -216,5 +380,12 @@ emergencyRequestSchema.pre("save", function (next) {
   }
   next();
 });
+
+// ─────────────────────────────────────────────
+// Export constants so controllers can import
+// them without re-declaring
+// ─────────────────────────────────────────────
+emergencyRequestSchema.statics.SPECIALIZATIONS = SPECIALIZATIONS;
+emergencyRequestSchema.statics.STATUSES = EMERGENCY_STATUSES;
 
 module.exports = mongoose.model("EmergencyRequest", emergencyRequestSchema);

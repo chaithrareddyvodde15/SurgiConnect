@@ -2,24 +2,28 @@ const Hospital = require("../models/Hospital");
 const { validationResult } = require("express-validator");
 
 // ─────────────────────────────────────────────
-// Helper: format validation errors
+// Helper: Validation Errors
 // ─────────────────────────────────────────────
 const handleValidationErrors = (req, res) => {
   const errors = validationResult(req);
+
   if (!errors.isEmpty()) {
     return res.status(400).json({
       success: false,
       message: "Validation failed",
-      errors: errors.array().map((e) => ({ field: e.path, message: e.msg })),
+      errors: errors.array().map(err => ({
+        field: err.path,
+        message: err.msg,
+      })),
     });
   }
+
   return null;
 };
 
 // ─────────────────────────────────────────────
-// @desc    Create a new hospital
-// @route   POST /api/hospitals
-// @access  Admin only
+// Create Hospital
+// POST /api/hospitals
 // ─────────────────────────────────────────────
 const createHospital = async (req, res) => {
   try {
@@ -28,8 +32,14 @@ const createHospital = async (req, res) => {
 
     const existing = await Hospital.findOne({
       $or: [
-        { registrationNumber: req.body.registrationNumber?.toUpperCase() },
-        { "contact.email": req.body.contact?.email?.toLowerCase() },
+        {
+          registrationNumber:
+            req.body.registrationNumber?.toUpperCase(),
+        },
+        {
+          "contact.email":
+            req.body.contact?.email?.toLowerCase(),
+        },
       ],
     });
 
@@ -37,239 +47,417 @@ const createHospital = async (req, res) => {
       return res.status(409).json({
         success: false,
         message:
-          existing.registrationNumber === req.body.registrationNumber?.toUpperCase()
-            ? "A hospital with this registration number already exists"
-            : "A hospital with this email already exists",
+          existing.registrationNumber ===
+          req.body.registrationNumber?.toUpperCase()
+            ? "Hospital registration number already exists"
+            : "Hospital email already exists",
       });
     }
 
     const hospital = await Hospital.create({
       ...req.body,
-      createdBy: req.user._id, // from auth middleware
+      createdBy: req.user._id,
     });
 
-    return res.status(201).json({
+    res.status(201).json({
       success: true,
       message: "Hospital created successfully",
       data: hospital,
     });
   } catch (error) {
-    console.error("createHospital error:", error);
+    console.error(error);
 
-    if (error.code === 11000) {
-      const field = Object.keys(error.keyValue)[0];
-      return res.status(409).json({
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+// ─────────────────────────────────────────────
+// Get Logged-in Hospital Profile
+// GET /api/hospitals/profile
+// ─────────────────────────────────────────────
+const getHospitalProfile = async (req, res) => {
+  try {
+    const hospital = await Hospital.findOne({
+      createdBy: req.user._id,
+    })
+      .populate("managers", "name email phone")
+      .populate("doctors", "name email")
+      .populate("createdBy", "name email");
+
+    if (!hospital) {
+      return res.status(404).json({
         success: false,
-        message: `Duplicate value for field: ${field}`,
+        message: "Hospital profile not found",
       });
     }
 
-    return res.status(500).json({ success: false, message: "Server error", error: error.message });
+    res.status(200).json({
+      success: true,
+      data: hospital,
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
   }
 };
 
 // ─────────────────────────────────────────────
-// @desc    Get all hospitals (with filters & pagination)
-// @route   GET /api/hospitals
-// @access  Admin, Hospital Manager
+// Update Logged-in Hospital Profile
+// PATCH /api/hospitals/profile
+// ─────────────────────────────────────────────
+const updateHospitalProfile = async (req, res) => {
+  try {
+    const validationError = handleValidationErrors(req, res);
+    if (validationError) return;
+
+    const hospital = await Hospital.findOne({
+      createdBy: req.user._id,
+    });
+
+    if (!hospital) {
+      return res.status(404).json({
+        success: false,
+        message: "Hospital profile not found",
+      });
+    }
+
+    const {
+      name,
+      registrationNumber,
+      type,
+      status,
+      contact,
+      address,
+      facilities,
+      specializations,
+      location,
+    } = req.body;
+
+    // Name
+    if (name !== undefined) {
+      if (!name.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Hospital name cannot be empty",
+        });
+      }
+
+      hospital.name = name.trim();
+    }
+
+    // Registration Number
+    if (registrationNumber !== undefined) {
+      if (!registrationNumber.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Registration number cannot be empty",
+        });
+      }
+
+      hospital.registrationNumber =
+        registrationNumber.trim().toUpperCase();
+    }
+
+    // Type
+    if (type !== undefined) {
+      const validTypes = [
+        "Government",
+        "Private",
+        "Semi-Government",
+        "Trust",
+        "Clinic",
+      ];
+
+      if (!validTypes.includes(type)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid hospital type",
+        });
+      }
+
+      hospital.type = type;
+    }
+
+    // Status
+    if (status !== undefined) {
+      const validStatus = [
+        "Active",
+        "Inactive",
+        "Suspended",
+      ];
+
+      if (!validStatus.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid hospital status",
+        });
+      }
+
+      hospital.status = status;
+    }
+
+    // Contact
+    if (contact) {
+      hospital.contact = {
+        ...hospital.contact,
+        ...contact,
+      };
+    }
+
+    // Address
+    if (address) {
+      hospital.address = {
+        ...hospital.address,
+        ...address,
+      };
+    }
+
+    // Facilities
+    if (facilities) {
+      hospital.facilities = {
+        ...hospital.facilities,
+        ...facilities,
+      };
+    }
+
+    // Specializations
+    if (specializations !== undefined) {
+      hospital.specializations = specializations;
+    }
+
+    // Location
+    if (location) {
+      hospital.location = {
+        ...hospital.location,
+        ...location,
+      };
+    }
+
+    await hospital.save();
+
+    const updatedHospital = await Hospital.findById(hospital._id)
+      .populate("managers", "name email phone")
+      .populate("doctors", "name email")
+      .populate("createdBy", "name email");
+
+    res.status(200).json({
+      success: true,
+      message: "Hospital profile updated successfully",
+      data: updatedHospital,
+    });
+  } catch (error) {
+    console.error(error);
+
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyValue)[0];
+
+      return res.status(409).json({
+        success: false,
+        message: `${field} already exists`,
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+// ─────────────────────────────────────────────
+// Get All Hospitals
+// GET /api/hospitals
 // ─────────────────────────────────────────────
 const getAllHospitals = async (req, res) => {
   try {
-    const {
-      page = 1,
-      limit = 10,
-      status,
-      type,
-      city,
-      search,
-      sortBy = "createdAt",
-      order = "desc",
-    } = req.query;
+    const hospitals = await Hospital.find()
+      .populate("managers", "name email")
+      .populate("createdBy", "name email");
 
-    const filter = {};
-
-    if (status)  filter.status = status;
-    if (type)    filter.type = type;
-    if (city)    filter["address.city"] = { $regex: city, $options: "i" };
-    if (search)  filter.$text = { $search: search };
-
-    const skip = (Number(page) - 1) * Number(limit);
-    const sortOrder = order === "asc" ? 1 : -1;
-
-    const [hospitals, total] = await Promise.all([
-      Hospital.find(filter)
-        .populate("managers", "name email")
-        .populate("createdBy", "name email")
-        .sort({ [sortBy]: sortOrder })
-        .skip(skip)
-        .limit(Number(limit))
-        .lean(),
-      Hospital.countDocuments(filter),
-    ]);
-
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
-      message: "Hospitals fetched successfully",
       data: hospitals,
-      pagination: {
-        total,
-        page: Number(page),
-        limit: Number(limit),
-        totalPages: Math.ceil(total / Number(limit)),
-      },
     });
   } catch (error) {
-    console.error("getAllHospitals error:", error);
-    return res.status(500).json({ success: false, message: "Server error", error: error.message });
+    console.error(error);
+
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
   }
 };
 
 // ─────────────────────────────────────────────
-// @desc    Get hospital by ID
-// @route   GET /api/hospitals/:id
-// @access  Admin, Hospital Manager
+// Get Hospital By ID
+// GET /api/hospitals/:id
 // ─────────────────────────────────────────────
 const getHospitalById = async (req, res) => {
   try {
     const hospital = await Hospital.findById(req.params.id)
       .populate("managers", "name email phone")
-      .populate("doctors",  "name email specialization")
-      .populate("createdBy","name email");
+      .populate("doctors", "name email")
+      .populate("createdBy", "name email");
 
     if (!hospital) {
-      return res.status(404).json({ success: false, message: "Hospital not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Hospital not found",
+      });
     }
 
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
-      message: "Hospital fetched successfully",
       data: hospital,
     });
   } catch (error) {
-    console.error("getHospitalById error:", error);
+    console.error(error);
 
-    if (error.name === "CastError") {
-      return res.status(400).json({ success: false, message: "Invalid hospital ID format" });
-    }
-
-    return res.status(500).json({ success: false, message: "Server error", error: error.message });
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
   }
 };
 
 // ─────────────────────────────────────────────
-// @desc    Update hospital
-// @route   PUT /api/hospitals/:id
-// @access  Admin only
+// Update Hospital By ID
+// PUT /api/hospitals/:id
 // ─────────────────────────────────────────────
 const updateHospital = async (req, res) => {
   try {
-    const validationError = handleValidationErrors(req, res);
-    if (validationError) return;
-
-    // Prevent overwriting protected fields
-    const { createdBy, doctors, ...updateData } = req.body;
-
     const hospital = await Hospital.findByIdAndUpdate(
       req.params.id,
-      { $set: updateData },
-      { new: true, runValidators: true }
-    )
-      .populate("managers", "name email")
-      .populate("createdBy", "name email");
+      req.body,
+      {
+        new: true,
+        runValidators: true,
+      }
+    );
 
     if (!hospital) {
-      return res.status(404).json({ success: false, message: "Hospital not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Hospital not found",
+      });
     }
 
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
       message: "Hospital updated successfully",
       data: hospital,
     });
   } catch (error) {
-    console.error("updateHospital error:", error);
+    console.error(error);
 
-    if (error.name === "CastError") {
-      return res.status(400).json({ success: false, message: "Invalid hospital ID format" });
-    }
-    if (error.code === 11000) {
-      const field = Object.keys(error.keyValue)[0];
-      return res.status(409).json({ success: false, message: `Duplicate value for: ${field}` });
-    }
-
-    return res.status(500).json({ success: false, message: "Server error", error: error.message });
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
   }
 };
 
 // ─────────────────────────────────────────────
-// @desc    Delete hospital (soft delete via status)
-// @route   DELETE /api/hospitals/:id
-// @access  Admin only
+// Soft Delete Hospital
+// DELETE /api/hospitals/:id
 // ─────────────────────────────────────────────
 const deleteHospital = async (req, res) => {
   try {
     const hospital = await Hospital.findById(req.params.id);
 
     if (!hospital) {
-      return res.status(404).json({ success: false, message: "Hospital not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Hospital not found",
+      });
     }
 
-    // Soft delete — mark as Suspended instead of removing from DB
     hospital.status = "Suspended";
+
     await hospital.save();
 
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
-      message: "Hospital suspended (soft deleted) successfully",
-      data: { id: hospital._id, status: hospital.status },
+      message: "Hospital suspended successfully",
     });
   } catch (error) {
-    console.error("deleteHospital error:", error);
+    console.error(error);
 
-    if (error.name === "CastError") {
-      return res.status(400).json({ success: false, message: "Invalid hospital ID format" });
-    }
-
-    return res.status(500).json({ success: false, message: "Server error", error: error.message });
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
   }
 };
 
 // ─────────────────────────────────────────────
-// @desc    Assign a manager to a hospital
-// @route   PATCH /api/hospitals/:id/assign-manager
-// @access  Admin only
+// Assign Manager
+// PATCH /api/hospitals/:id/assign-manager
 // ─────────────────────────────────────────────
 const assignManager = async (req, res) => {
   try {
     const { managerId } = req.body;
 
     if (!managerId) {
-      return res.status(400).json({ success: false, message: "managerId is required" });
+      return res.status(400).json({
+        success: false,
+        message: "managerId is required",
+      });
     }
 
     const hospital = await Hospital.findByIdAndUpdate(
       req.params.id,
-      { $addToSet: { managers: managerId } }, // addToSet prevents duplicates
-      { new: true }
+      {
+        $addToSet: {
+          managers: managerId,
+        },
+      },
+      {
+        new: true,
+      }
     ).populate("managers", "name email");
 
     if (!hospital) {
-      return res.status(404).json({ success: false, message: "Hospital not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Hospital not found",
+      });
     }
 
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
       message: "Manager assigned successfully",
       data: hospital,
     });
   } catch (error) {
-    console.error("assignManager error:", error);
-    return res.status(500).json({ success: false, message: "Server error", error: error.message });
+    console.error(error);
+
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
   }
 };
 
 module.exports = {
   createHospital,
+  getHospitalProfile,
+  updateHospitalProfile,
   getAllHospitals,
   getHospitalById,
   updateHospital,

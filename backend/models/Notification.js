@@ -7,8 +7,8 @@ const mongoose = require("mongoose");
 const deliveryStatusSchema = new mongoose.Schema(
   {
     inApp: {
-      sent: { type: Boolean, default: true },
-      sentAt: { type: Date, default: Date.now },
+      sent:   { type: Boolean, default: true },
+      sentAt: { type: Date,    default: Date.now },
     },
 
     // ── Email (future) ──────────────────────
@@ -43,7 +43,7 @@ const deliveryStatusSchema = new mongoose.Schema(
 // ─────────────────────────────────────────────
 const aiMetadataSchema = new mongoose.Schema(
   {
-    isAiGenerated:          { type: Boolean, default: false },
+    isAiGenerated: { type: Boolean, default: false },
 
     // AI Doctor Recommendation alert
     recommendedSpecializations: { type: [String], default: [] },
@@ -112,18 +112,50 @@ const notificationSchema = new mongoose.Schema(
       maxlength: [1000, "Message cannot exceed 1000 characters"],
     },
 
+    /**
+     * Notification type enum.
+     *
+     * Existing types (unchanged — backward compatible):
+     *   EmergencyCreated     — emergency request created (general)
+     *   DoctorAssigned       — doctor formally assigned to a request
+     *   EmergencyUpdated     — status update (started, general changes)
+     *   EmergencyCompleted   — treatment completed
+     *   General              — catch-all
+     *   AIDoctorRecommendation / AIUrgencyAlert — AI-generated alerts
+     *
+     * New types added for the real-time emergency response workflow:
+     *   EmergencyBroadcast   — sent to doctors when a matching emergency
+     *                          is created; the message describes specialization
+     *                          and severity. Replaces a dedicated "NewEmergencyRequest"
+     *                          type — it IS the broadcast.
+     *   DoctorResponded      — sent to the hospital manager when any doctor
+     *                          accepts or declines. The message body carries
+     *                          the action (Accept / Decline) and details,
+     *                          avoiding the need for separate Accept/Decline types.
+     *   DoctorConfirmed      — sent to the confirmed doctor when the hospital
+     *                          selects them. Distinct from DoctorAssigned because
+     *                          it fires before the formal assignment step.
+     *
+     * Design principle: prefer reusing existing types when the message payload
+     * carries sufficient context. New types are added only when the recipient
+     * or semantic meaning is fundamentally different.
+     */
     type: {
       type: String,
       enum: {
         values: [
+          // ── Existing (unchanged) ──────────
           "EmergencyCreated",
           "DoctorAssigned",
           "EmergencyUpdated",
           "EmergencyCompleted",
           "General",
-          // AI alert types — ready for future use
           "AIDoctorRecommendation",
           "AIUrgencyAlert",
+          // ── New — Emergency Response Flow ─
+          "EmergencyBroadcast",   // Doctor receives: new emergency matching their specialization
+          "DoctorResponded",      // Manager receives: a doctor accepted or declined
+          "DoctorConfirmed",      // Doctor receives: hospital has confirmed them
         ],
         message: "Invalid notification type",
       },
@@ -151,14 +183,12 @@ const notificationSchema = new mongoose.Schema(
     },
 
     // ── Delivery Channels ────────────────────
-    // Future: email, SMS, Socket.IO
     delivery: {
       type:    deliveryStatusSchema,
       default: () => ({}),
     },
 
     // ── AI Metadata ──────────────────────────
-    // Future: AI recommendation & urgency alerts
     aiMetadata: {
       type:    aiMetadataSchema,
       default: () => ({}),
