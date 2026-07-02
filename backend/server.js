@@ -4,6 +4,8 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const mongoose = require("mongoose");
 const { Server } = require("socket.io");
+const swaggerUi = require("swagger-ui-express");
+const swaggerSpec = require("./docs/swagger");
 
 dotenv.config();
 
@@ -69,6 +71,11 @@ app.use("/api/ai-recommendations", aiRecommendationRoutes);
 app.use("/api/assignments", doctorAssignmentRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/patients", patientRoutes);
+app.use(
+    "/api-docs",
+    swaggerUi.serve,
+    swaggerUi.setup(swaggerSpec)
+);
 
 const PORT = process.env.PORT || 5000;
 
