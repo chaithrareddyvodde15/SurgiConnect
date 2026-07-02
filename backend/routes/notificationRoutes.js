@@ -59,7 +59,7 @@ const createNotificationValidation = [
 router.get(
   "/unread-count",
   protect,
-  authorizeRoles("manager", "doctor"),
+  authorizeRoles("hospital", "doctor"),
   getUnreadCount
 );
 
@@ -68,7 +68,7 @@ router.get(
 router.patch(
   "/read-all",
   protect,
-  authorizeRoles("manager", "doctor"),
+  authorizeRoles("hospital", "doctor"),
   markAllAsRead
 );
 
@@ -76,21 +76,21 @@ router.patch(
 // GET   /api/notifications        → Get own list (Manager, Doctor)
 router
   .route("/")
-  .post(protect, authorizeRoles("manager"), createNotificationValidation, createNotification)
-  .get( protect, authorizeRoles("manager", "doctor"), getUserNotifications);
+  .post(protect, authorizeRoles("hospital"), createNotificationValidation, createNotification)
+  .get( protect, authorizeRoles("hospital", "doctor"), getUserNotifications);
 
 // GET    /api/notifications/:id   → Get by ID   (Manager, Doctor)
 // DELETE /api/notifications/:id   → Soft delete (Manager, Doctor)
 router
   .route("/:id")
-  .get(   protect, authorizeRoles("manager", "doctor"), getNotificationById)
-  .delete(protect, authorizeRoles("manager", "doctor"), deleteNotification);
+  .get(   protect, authorizeRoles("hospital", "doctor"), getNotificationById)
+  .delete(protect, authorizeRoles("hospital", "doctor"), deleteNotification);
 
 // PATCH /api/notifications/:id/read  → Mark single as read (Manager, Doctor)
 router.patch(
   "/:id/read",
   protect,
-  authorizeRoles("manager", "doctor"),
+  authorizeRoles("hospital", "doctor"),
   markAsRead
 );
 

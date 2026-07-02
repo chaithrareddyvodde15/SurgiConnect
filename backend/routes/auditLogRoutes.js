@@ -65,7 +65,7 @@ const createAuditLogValidation = [
 router.get(
   "/recent",
   protect,
-  authorizeRoles("manager"),
+  authorizeRoles("hospital"),
   getRecentActivity
 );
 
@@ -73,7 +73,7 @@ router.get(
 router.get(
   "/user/:userId",
   protect,
-  authorizeRoles("manager", "doctor"),
+  authorizeRoles("hospital", "doctor"),
   getLogsByUser
 );
 
@@ -81,7 +81,7 @@ router.get(
 router.get(
   "/entity/:entityType/:entityId",
   protect,
-  authorizeRoles("manager"),
+  authorizeRoles("hospital"),
   getLogsByEntity
 );
 
@@ -89,12 +89,12 @@ router.get(
 // GET  /api/audit-logs        → Get all (Manager)
 router
   .route("/")
-  .post(protect, authorizeRoles("manager"), createAuditLogValidation, createAuditLogHandler)
-  .get( protect, authorizeRoles("manager"), getAllAuditLogs);
+  .post(protect, authorizeRoles("hospital"), createAuditLogValidation, createAuditLogHandler)
+  .get( protect, authorizeRoles("hospital"), getAllAuditLogs);
 
 // GET /api/audit-logs/:id     → Get by ID (Manager)
 router
   .route("/:id")
-  .get(protect, authorizeRoles("manager"), getAuditLogById);
+  .get(protect, authorizeRoles("hospital"), getAuditLogById);
 
 module.exports = router;
